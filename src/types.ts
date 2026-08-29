@@ -4,6 +4,7 @@ export type ViewId =
   | "favorites"
   | "planner"
   | "smart"
+  | "passwords"
   | "settings";
 
 export interface Workspace {
@@ -25,6 +26,7 @@ export interface FileEntry {
   modifiedAt: number;
   favorite: boolean;
   ocrIndexed: boolean;
+  tags: string[];
 }
 
 export interface FavoriteCategory {
@@ -93,6 +95,19 @@ export interface BootstrapData {
   settings: AppSettings;
   connectors: ConnectorStatus[];
   recentFiles: FileEntry[];
+  passwords: PasswordEntry[];
+  allTags: string[];
+}
+
+export interface PasswordEntry {
+  id: string;
+  title: string;
+  url: string;
+  username: string;
+  notes: string;
+  groupTag: string;
+  createdAt: number;
+  updatedAt: number;
 }
 
 export interface OperationResult {

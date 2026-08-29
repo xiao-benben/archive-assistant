@@ -33,18 +33,23 @@ import {
   FileSearch,
   FileSpreadsheet,
   FileText,
+  CheckSquare,
+  Dices,
   ExternalLink,
+  Eye,
+  EyeOff,
   Folder,
   FolderOpen,
   FolderPlus,
   Heart,
   Home,
   Import,
+  KeyRound,
   LayoutGrid,
   List,
   LoaderCircle,
-  Locate,
   Menu,
+  MinusSquare,
   MonitorSmartphone,
   Moon,
   Move,
@@ -57,8 +62,11 @@ import {
   ShieldCheck,
   Smartphone,
   Sparkles,
+  Square,
   Star,
+  StarOff,
   Sun,
+  Tag,
   Trash2,
   WifiOff,
   X,
@@ -70,6 +78,7 @@ import type {
   BootstrapData,
   FileEntry,
   OcrResult,
+  PasswordEntry,
   PlanScope,
   PlanTask,
   TaskPriority,
@@ -98,6 +107,15 @@ const bytes = (size: number) => {
   const u = ["B", "KB", "MB", "GB", "TB"];
   const i = Math.min(Math.floor(Math.log(size) / Math.log(1024)), 4);
   return `${(size / 1024 ** i).toFixed(i > 1 ? 1 : 0)} ${u[i]}`;
+};
+const tagHue = (tag: string) =>
+  [...tag].reduce((acc, ch) => (acc * 31 + ch.charCodeAt(0)) % 360, 7);
+const tagStyle = (tag: string) => {
+  const hue = tagHue(tag);
+  return {
+    background: `hsl(${hue} 72% 90%)`,
+    color: `hsl(${hue} 55% 30%)`,
+  } as React.CSSProperties;
 };
 const message = (error: unknown) =>
   typeof error === "string"
@@ -136,6 +154,9 @@ type Dialog =
       defaults?: { planScope: PlanScope; dueDate: string };
     }
   | { type: "ocr"; entry: FileEntry }
+  | { type: "password"; entry?: PasswordEntry }
+  | { type: "password-delete"; entry: PasswordEntry }
+  | { type: "tag"; paths: string[] }
   | null;
 
 function Modal({
@@ -511,6 +532,52 @@ export default function App() {
       setBusy(false);
     }
   };
+  const savePassword = (entry: {
+    id?: string;
+    title: string;
+    url?: string;
+    username?: string;
+    password?: string;
+    notes?: string;
+    groupTag?: string;
+  }) => action(() => api.savePasswordEntry(entry), "密码已加密保存");
+  const deletePassword = (id: string) =>
+    action(() => api.deletePasswordEntry(id), "密码条目已删除");
+  const copyPassword = async (entry: PasswordEntry) => {
+    if (!isTauri()) return tell("请在桌面应用中查看密码", true);
+    try {
+      const plain = await api.revealPassword(entry.id);
+      if (!plain) return tell("该条目没有保存密码", true);
+      await navigator.clipboard.writeText(plain);
+      tell("密码已复制到剪贴板");
+    } catch (error) {
+      tell(message(error), true);
+    }
+  };
+  const copyUsername = async (entry: PasswordEntry) => {
+    if (!entry.username) return tell("该条目没有保存账号", true);
+    await navigator.clipboard.writeText(entry.username);
+    tell("账号已复制到剪贴板");
+  };
+  const [revealedPasswords, setRevealedPasswords] = useState<
+    Record<string, string>
+  >({});
+  const reveal = async (entry: PasswordEntry) => {
+    if (revealedPasswords[entry.id] !== undefined) {
+      setRevealedPasswords((old) => {
+        const { [entry.id]: _omit, ...rest } = old;
+        return rest;
+      });
+      return;
+    }
+    if (!isTauri()) return tell("请在桌面应用中查看密码", true);
+    try {
+      const plain = await api.revealPassword(entry.id);
+      setRevealedPasswords((old) => ({ ...old, [entry.id]: plain }));
+    } catch (error) {
+      tell(message(error), true);
+    }
+  };
   if (loading && !data)
     return (
       <div className="splash">
@@ -534,10 +601,23 @@ export default function App() {
     { id: "home", label: "总览", icon: <Home /> },
     { id: "favorites", label: "收藏", icon: <Star /> },
     { id: "planner", label: "计划", icon: <ClipboardList /> },
+    { id: "passwords", label: "密码本", icon: <KeyRound /> },
     { id: "smart", label: "智能中心", icon: <Sparkles /> },
   ];
   return (
     <div className="app-shell">
+      <datalist id="archive-all-tags">
+        {data.allTags.map((t) => (
+          <option key={t} value={t} />
+        ))}
+      </datalist>
+      <datalist id="password-group-suggestions">
+        {[...new Set(data.passwords.map((p) => p.groupTag).filter(Boolean))].map(
+          (g) => (
+            <option key={g} value={g} />
+          ),
+        )}
+      </datalist>
       {dragging && (
         <div className="drop-overlay">
           <Import />
@@ -772,6 +852,25 @@ export default function App() {
                   return { message: "已取消收藏" };
                 }, "已取消收藏")
               }
+              toggleSelectAll={() =>
+                setSelected((old) =>
+                  files.length && old.size === files.length
+                    ? new Set()
+                    : new Set(files.map((f) => f.relativePath)),
+                )
+              }
+              addTag={(entry, tag) =>
+                action(
+                  () => api.addFileTags([entry.relativePath], tag),
+                  `已添加标签“${tag}”`,
+                )
+              }
+              removeTag={(entry, tag) =>
+                action(
+                  () => api.removeFileTags([entry.relativePath], tag),
+                  `已移除标签“${tag}”`,
+                )
+              }
             />
           )}
           {view === "favorites" && (
@@ -802,6 +901,19 @@ export default function App() {
               drop={(categoryId, sourcePaths) =>
                 action(() => api.addFavoritesFromPaths(categoryId, sourcePaths))
               }
+            />
+          )}
+          {view === "passwords" && (
+            <PasswordsPage
+              data={data}
+              busy={busy}
+              create={() => setDialog({ type: "password" })}
+              edit={(entry) => setDialog({ type: "password", entry })}
+              remove={(entry) => setDialog({ type: "password-delete", entry })}
+              copyPassword={copyPassword}
+              copyUsername={copyUsername}
+              reveal={reveal}
+              revealed={revealedPasswords}
             />
           )}
           {view === "planner" && (
@@ -937,6 +1049,51 @@ export default function App() {
             action(
               () => api.createFavoriteCategory(name, color),
               "收藏分区已创建",
+            )
+          }
+        />
+      )}
+      {dialog?.type === "password" && (
+        <PasswordDialog
+          entry={dialog.entry}
+          busy={busy}
+          close={() => setDialog(null)}
+          submit={savePassword}
+        />
+      )}
+      {dialog?.type === "password-delete" && (
+        <Modal
+          title="删除密码条目"
+          text={`确定删除“${dialog.entry.title}”吗？删除后无法恢复。`}
+          close={() => setDialog(null)}
+        >
+          <div className="modal-actions">
+            <button className="button secondary" onClick={() => setDialog(null)}>
+              取消
+            </button>
+            <button
+              className="button danger"
+              disabled={busy}
+              onClick={() => deletePassword(dialog.entry.id)}
+            >
+              <Trash2 />
+              删除
+            </button>
+          </div>
+        </Modal>
+      )}
+      {dialog?.type === "tag" && (
+        <TagDialog
+          paths={dialog.paths}
+          busy={busy}
+          close={() => setDialog(null)}
+          submit={(tag, mode) =>
+            action(
+              () =>
+                mode === "add"
+                  ? api.addFileTags(dialog.paths, tag)
+                  : api.removeFileTags(dialog.paths, tag),
+              mode === "add" ? `已添加标签“${tag}”` : `已移除标签“${tag}”`,
             )
           }
         />
@@ -1183,6 +1340,9 @@ function FilesPage({
   refresh,
   removeWorkspace,
   unfavorite,
+  toggleSelectAll,
+  addTag,
+  removeTag,
 }: {
   path: string;
   files: FileEntry[];
@@ -1203,6 +1363,9 @@ function FilesPage({
   refresh: () => void;
   removeWorkspace: (path: string) => void;
   unfavorite: (entry: FileEntry) => void;
+  toggleSelectAll: () => void;
+  addTag: (entry: FileEntry, tag: string) => void;
+  removeTag: (entry: FileEntry, tag: string) => void;
 }) {
   const parts = path.split("\\").filter(Boolean);
   const ocr =
@@ -1211,6 +1374,9 @@ function FilesPage({
     ["png", "jpg", "jpeg", "webp", "tif", "tiff", "pdf"].includes(
       one.extension,
     );
+  const paths = [...selected];
+  const allSelected = files.length > 0 && selected.size === files.length;
+  const partialSelected = selected.size > 0 && !allSelected;
   return (
     <div className="page workspace-page">
       <div className="workspace-header">
@@ -1262,6 +1428,23 @@ function FilesPage({
             <LayoutGrid />
           </button>
           <i />
+          <button
+            className={`select-all${allSelected ? " checked" : partialSelected ? " partial" : ""}`}
+            onClick={toggleSelectAll}
+            title={
+              allSelected ? "取消全选" : partialSelected ? "取消全选" : "全选"
+            }
+            aria-label={allSelected ? "取消全选" : "全选"}
+          >
+            {allSelected ? (
+              <CheckSquare />
+            ) : partialSelected ? (
+              <MinusSquare />
+            ) : (
+              <Square />
+            )}
+            {allSelected || partialSelected ? "取消全选" : "全选"}
+          </button>
           <span>
             {files.length} 项
             {selected.size ? ` · 已选择 ${selected.size} 项` : ""}
@@ -1292,6 +1475,10 @@ function FilesPage({
                   改名
                 </button>
               )}
+              <button onClick={() => dialog({ type: "tag", paths })}>
+                <Tag />
+                标签
+              </button>
               <button
                 className="danger-text"
                 onClick={() => dialog({ type: "delete" })}
@@ -1346,6 +1533,20 @@ function FilesPage({
                   <small>
                     {file.isDirectory ? "文件夹" : bytes(file.size)}
                   </small>
+                  {file.tags.length > 0 && (
+                    <span className="tile-tags">
+                      {file.tags.slice(0, 2).map((t) => (
+                        <em key={t} className="tag-chip" style={tagStyle(t)}>
+                          {t}
+                        </em>
+                      ))}
+                      {file.tags.length > 2 && (
+                        <em className="tag-chip tag-more">
+                          +{file.tags.length - 2}
+                        </em>
+                      )}
+                    </span>
+                  )}
                   {file.favorite && (
                     <span className="favorite-tile-tag">
                       <Heart />
@@ -1387,6 +1588,11 @@ function FilesPage({
                         已收藏
                       </em>
                     )}
+                    {file.tags.map((t) => (
+                      <em key={t} className="tag-chip" style={tagStyle(t)}>
+                        {t}
+                      </em>
+                    ))}
                   </span>
                   <span className="file-type">
                     {file.isDirectory
@@ -1435,6 +1641,11 @@ function FilesPage({
             </div>
             <h3>{one.name}</h3>
             <p>{one.relativePath}</p>
+            <TagEditor
+              tags={one.tags}
+              onAdd={(tag) => addTag(one, tag)}
+              onRemove={(tag) => removeTag(one, tag)}
+            />
             <dl>
               <div>
                 <dt>类型</dt>
@@ -1490,6 +1701,440 @@ function FilesPage({
         )}
       </div>
     </div>
+  );
+}
+
+function TagEditor({
+  tags,
+  onAdd,
+  onRemove,
+}: {
+  tags: string[];
+  onAdd: (tag: string) => void;
+  onRemove: (tag: string) => void;
+}) {
+  const [value, setValue] = useState("");
+  const submit = () => {
+    const tag = value.trim();
+    setValue("");
+    if (!tag || tags.includes(tag)) return;
+    onAdd(tag);
+  };
+  return (
+    <div className="tag-editor">
+      <span className="tag-editor-label">
+        <Tag />
+        标签
+      </span>
+      <div className="tag-chips">
+        {tags.map((t) => (
+          <span key={t} className="tag-chip" style={tagStyle(t)}>
+            {t}
+            <button
+              type="button"
+              aria-label={`删除标签 ${t}`}
+              onClick={() => onRemove(t)}
+            >
+              <X />
+            </button>
+          </span>
+        ))}
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            submit();
+          }}
+        >
+          <input
+            list="archive-all-tags"
+            value={value}
+            placeholder="添加标签"
+            onChange={(e) => setValue(e.target.value)}
+          />
+        </form>
+      </div>
+    </div>
+  );
+}
+
+function PasswordsPage({
+  data,
+  busy,
+  create,
+  edit,
+  remove,
+  copyPassword,
+  copyUsername,
+  reveal,
+  revealed,
+}: {
+  data: BootstrapData;
+  busy: boolean;
+  create: () => void;
+  edit: (entry: PasswordEntry) => void;
+  remove: (entry: PasswordEntry) => void;
+  copyPassword: (entry: PasswordEntry) => void;
+  copyUsername: (entry: PasswordEntry) => void;
+  reveal: (entry: PasswordEntry) => void;
+  revealed: Record<string, string>;
+}) {
+  const [query, setQuery] = useState("");
+  const [group, setGroup] = useState("");
+  const q = query.trim().toLowerCase();
+  const groups = [
+    ...new Set(data.passwords.map((p) => p.groupTag).filter(Boolean)),
+  ];
+  const items = data.passwords.filter(
+    (p) =>
+      (!group || p.groupTag === group) &&
+      (!q ||
+        [p.title, p.url, p.username, p.notes, p.groupTag].some((field) =>
+          field.toLowerCase().includes(q),
+        )),
+  );
+  return (
+    <div className="page">
+      <Heading
+        eyebrow="PASSWORDS"
+        title="密码本"
+        text="常用网站的账号密码，AES-256 加密后只存放在本机。"
+        action={
+          <button className="button primary" onClick={create}>
+            <Plus />
+            新增密码
+          </button>
+        }
+      />
+      <div className="password-tools">
+        <div className="password-search">
+          <Search />
+          <input
+            value={query}
+            placeholder="搜索标题、网站、账号或备注"
+            onChange={(e) => setQuery(e.target.value)}
+          />
+        </div>
+        {groups.length > 0 && (
+          <div className="password-groups">
+            <button className={!group ? "active" : ""} onClick={() => setGroup("")}>
+              全部
+            </button>
+            {groups.map((g) => (
+              <button
+                key={g}
+                className={group === g ? "active" : ""}
+                onClick={() => setGroup(g)}
+              >
+                {g}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+      {items.length ? (
+        <div className="password-list">
+          {items.map((p) => (
+            <div className="password-card" key={p.id}>
+              <span className="password-avatar" style={tagStyle(p.title)}>
+                {p.title.slice(0, 1).toUpperCase()}
+              </span>
+              <div className="password-info">
+                <strong>
+                  {p.title}
+                  {p.groupTag && (
+                    <em className="tag-chip" style={tagStyle(p.groupTag)}>
+                      {p.groupTag}
+                    </em>
+                  )}
+                </strong>
+                <small>{p.url || "未填写网址"}</small>
+                <small>{p.username || "未填写账号"}</small>
+                <div className="password-secret">
+                  {revealed[p.id] !== undefined ? (
+                    <>
+                      <span>{revealed[p.id] || "（未设置密码）"}</span>
+                      <button
+                        type="button"
+                        aria-label="隐藏密码"
+                        onClick={() => reveal(p)}
+                      >
+                        <EyeOff />
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <span>••••••••</span>
+                      <button
+                        type="button"
+                        aria-label="显示密码"
+                        onClick={() => reveal(p)}
+                      >
+                        <Eye />
+                      </button>
+                    </>
+                  )}
+                </div>
+              </div>
+              <div className="password-actions">
+                <button onClick={() => copyUsername(p)}>
+                  <Copy />
+                  账号
+                </button>
+                <button onClick={() => copyPassword(p)}>
+                  <KeyRound />
+                  密码
+                </button>
+                <button disabled={busy} onClick={() => edit(p)}>
+                  <FilePenLine />
+                  编辑
+                </button>
+                <button
+                  className="danger-text"
+                  disabled={busy}
+                  onClick={() => remove(p)}
+                >
+                  <Trash2 />
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <Empty
+          icon={<KeyRound />}
+          title={q || group ? "没有匹配的密码条目" : "密码本还是空的"}
+          text={
+            q || group
+              ? "换个关键词或分组试试。"
+              : "新增常用网站的账号密码，全部加密保存在本机。"
+          }
+          action={
+            !q && !group ? (
+              <button className="button primary" onClick={create}>
+                <Plus />
+                新增密码
+              </button>
+            ) : undefined
+          }
+        />
+      )}
+    </div>
+  );
+}
+
+const GENERATOR_BASE = "abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+
+function PasswordDialog({
+  entry,
+  busy,
+  close,
+  submit,
+}: {
+  entry?: PasswordEntry;
+  busy: boolean;
+  close: () => void;
+  submit: (entry: {
+    id?: string;
+    title: string;
+    url?: string;
+    username?: string;
+    password?: string;
+    notes?: string;
+    groupTag?: string;
+  }) => void;
+}) {
+  const [form, setForm] = useState({
+    title: entry?.title ?? "",
+    url: entry?.url ?? "",
+    username: entry?.username ?? "",
+    password: "",
+    notes: entry?.notes ?? "",
+    groupTag: entry?.groupTag ?? "",
+  });
+  const [show, setShow] = useState(false);
+  const [length, setLength] = useState(16);
+  const [symbols, setSymbols] = useState(true);
+  const generate = () => {
+    const chars = GENERATOR_BASE + (symbols ? "!@#$%^&*-_+=?" : "");
+    const random = crypto.getRandomValues(new Uint32Array(length));
+    const password = [...random]
+      .map((n) => chars[n % chars.length])
+      .join("");
+    setForm((f) => ({ ...f, password }));
+    setShow(true);
+  };
+  return (
+    <Modal
+      title={entry ? "编辑密码条目" : "新增密码条目"}
+      text="密码使用 AES-256-GCM 加密后存入本机数据库，密钥保存在 Windows 凭据管理器。"
+      close={close}
+    >
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          submit({
+            id: entry?.id,
+            title: form.title.trim(),
+            url: form.url.trim(),
+            username: form.username.trim(),
+            password: form.password || undefined,
+            notes: form.notes,
+            groupTag: form.groupTag.trim(),
+          });
+        }}
+      >
+        <label className="field">
+          <span>标题</span>
+          <input
+            autoFocus
+            required
+            value={form.title}
+            placeholder="如：公司邮箱"
+            onChange={(e) => setForm({ ...form, title: e.target.value })}
+          />
+        </label>
+        <label className="field">
+          <span>网站</span>
+          <input
+            value={form.url}
+            placeholder="https://example.com"
+            onChange={(e) => setForm({ ...form, url: e.target.value })}
+          />
+        </label>
+        <div className="field-row">
+          <label className="field">
+            <span>账号</span>
+            <input
+              value={form.username}
+              onChange={(e) => setForm({ ...form, username: e.target.value })}
+            />
+          </label>
+          <label className="field">
+            <span>分组</span>
+            <input
+              value={form.groupTag}
+              list="password-group-suggestions"
+              placeholder="如：工作"
+              onChange={(e) => setForm({ ...form, groupTag: e.target.value })}
+            />
+          </label>
+        </div>
+        <label className="field">
+          <span>{entry ? "密码（留空保持不变）" : "密码"}</span>
+          <div className="password-input">
+            <input
+              type={show ? "text" : "password"}
+              value={form.password}
+              placeholder={entry ? "留空则保持原密码" : "输入或一键生成"}
+              onChange={(e) => setForm({ ...form, password: e.target.value })}
+            />
+            <button
+              type="button"
+              aria-label={show ? "隐藏密码" : "显示密码"}
+              onClick={() => setShow(!show)}
+            >
+              {show ? <EyeOff /> : <Eye />}
+            </button>
+            <button type="button" aria-label="生成密码" onClick={generate}>
+              <Dices />
+            </button>
+          </div>
+        </label>
+        <div className="generator-row">
+          <label className="field">
+            <span>生成长度：{length}</span>
+            <input
+              type="range"
+              min={8}
+              max={64}
+              value={length}
+              onChange={(e) => setLength(Number(e.target.value))}
+            />
+          </label>
+          <button
+            type="button"
+            className={`generator-symbols ${symbols ? "on" : ""}`}
+            onClick={() => setSymbols(!symbols)}
+          >
+            {symbols ? "含符号" : "不含符号"}
+          </button>
+        </div>
+        <label className="field">
+          <span>备注</span>
+          <textarea
+            rows={2}
+            value={form.notes}
+            onChange={(e) => setForm({ ...form, notes: e.target.value })}
+          />
+        </label>
+        <div className="modal-actions">
+          <button
+            type="button"
+            className="button secondary"
+            onClick={close}
+          >
+            取消
+          </button>
+          <button className="button primary" disabled={busy || !form.title.trim()}>
+            {entry ? "保存修改" : "加密保存"}
+          </button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+function TagDialog({
+  paths,
+  busy,
+  close,
+  submit,
+}: {
+  paths: string[];
+  busy: boolean;
+  close: () => void;
+  submit: (tag: string, mode: "add" | "remove") => void;
+}) {
+  const [tag, setTag] = useState("");
+  const valid = tag.trim().length > 0;
+  return (
+    <Modal
+      title="文件标签"
+      text={`对已选中的 ${paths.length} 个项目添加或移除同一个标签。`}
+      close={close}
+    >
+      <form onSubmit={(e) => e.preventDefault()}>
+        <label className="field">
+          <span>标签</span>
+          <input
+            autoFocus
+            list="archive-all-tags"
+            value={tag}
+            placeholder="如：重要"
+            onChange={(e) => setTag(e.target.value)}
+          />
+        </label>
+        <div className="modal-actions">
+          <button type="button" className="button secondary" onClick={close}>
+            取消
+          </button>
+          <button
+            className="button secondary"
+            disabled={busy || !valid}
+            onClick={() => submit(tag.trim(), "remove")}
+          >
+            从所选移除
+          </button>
+          <button
+            className="button primary"
+            disabled={busy || !valid}
+            onClick={() => submit(tag.trim(), "add")}
+          >
+            添加到所选
+          </button>
+        </div>
+      </form>
+    </Modal>
   );
 }
 
@@ -1596,7 +2241,7 @@ function FavoritesPage({
                           open(f);
                         }}
                       >
-                        <Locate />
+                        <FolderOpen />
                       </button>
                       <button
                         type="button"
@@ -1607,7 +2252,7 @@ function FavoritesPage({
                           unfavorite(f);
                         }}
                       >
-                        <X />
+                        <StarOff />
                       </button>
                     </span>
                   )}

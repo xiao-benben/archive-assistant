@@ -1375,23 +1375,22 @@ select:focus-visible {
   display: flex;
 }
 .favorite-card-actions button {
-  width: 22px;
-  height: 22px;
-  border: 1px solid var(--line);
-  background: var(--paper);
-  border-radius: 6px;
+  width: 24px;
+  height: 24px;
+  border: 0;
+  background: transparent;
+  border-radius: 50%;
   display: grid;
   place-items: center;
   cursor: pointer;
   padding: 0;
 }
 .favorite-card-actions button:hover {
-  border-color: var(--blue);
-  color: var(--blue);
+  background: var(--blue-soft);
 }
 .favorite-card-actions button svg {
-  width: 12px;
-  height: 12px;
+  width: 14px;
+  height: 14px;
   color: var(--muted);
 }
 .favorite-card-actions button:hover svg {
@@ -2791,4 +2790,304 @@ select:focus-visible {
     animation: none !important;
     transition: none !important;
   }
+}
+
+/* ---- v0.2.0: select all, tags, password vault ---- */
+.select-all {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 28px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+  border-radius: 7px;
+  padding: 0 8px;
+  cursor: pointer;
+}
+.select-all svg {
+  width: 13px;
+  height: 13px;
+}
+.select-all:hover,
+.select-all.checked,
+.select-all.partial {
+  color: var(--blue);
+  background: var(--blue-soft);
+}
+.tag-chip {
+  font-style: normal;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 9px;
+  padding: 3px 6px;
+  border-radius: 5px;
+  line-height: 1;
+  white-space: nowrap;
+}
+.tag-chip button {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  color: inherit;
+  opacity: 0.6;
+}
+.tag-chip button:hover {
+  opacity: 1;
+}
+.tag-chip button svg {
+  width: 9px;
+  height: 9px;
+}
+.tag-chip.tag-more {
+  background: var(--soft);
+  color: var(--muted);
+}
+.tile-tags {
+  grid-column: 1 / -1;
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.tag-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 10px 0 2px;
+}
+.tag-editor-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.tag-editor-label svg {
+  width: 12px;
+  height: 12px;
+}
+.tag-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  align-items: center;
+}
+.tag-chips form {
+  display: contents;
+}
+.tag-chips input {
+  width: 90px;
+  height: 24px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--paper);
+  color: var(--ink);
+  font-size: 11px;
+  padding: 0 8px;
+}
+.password-tools {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+.password-search {
+  flex: 1;
+  min-width: 220px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 36px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--paper);
+  padding: 0 12px;
+  color: var(--muted);
+}
+.password-search input {
+  flex: 1;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--ink);
+  font-size: 12px;
+}
+.password-groups {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.password-groups button {
+  height: 30px;
+  border: 0;
+  background: var(--soft);
+  color: var(--muted);
+  font-size: 11px;
+  border-radius: 8px;
+  padding: 0 12px;
+  cursor: pointer;
+}
+.password-groups button.active {
+  background: var(--blue-soft);
+  color: var(--blue);
+  font-weight: 600;
+}
+.password-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.password-card {
+  display: grid;
+  grid-template-columns: 40px 1fr auto;
+  gap: 12px;
+  align-items: center;
+  border: 1px solid var(--line);
+  background: var(--paper);
+  border-radius: 12px;
+  padding: 12px;
+}
+.password-avatar {
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  display: grid;
+  place-items: center;
+  font-weight: 700;
+  font-size: 16px;
+}
+.password-info {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.password-info strong {
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.password-info small {
+  color: var(--muted);
+  font-size: 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.password-secret {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--ink);
+}
+.password-secret span {
+  font-family: ui-monospace, Consolas, monospace;
+  letter-spacing: 0.04em;
+}
+.password-secret button {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  padding: 2px;
+}
+.password-secret button:hover {
+  color: var(--blue);
+}
+.password-secret button svg {
+  width: 13px;
+  height: 13px;
+}
+.password-actions {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+.password-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 28px;
+  border: 0;
+  background: var(--soft);
+  color: var(--ink);
+  font-size: 11px;
+  border-radius: 8px;
+  padding: 0 10px;
+  cursor: pointer;
+}
+.password-actions button:hover {
+  background: var(--blue-soft);
+  color: var(--blue);
+}
+.password-actions button svg {
+  width: 12px;
+  height: 12px;
+}
+.password-input {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.password-input input {
+  flex: 1;
+}
+.password-input button {
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--line);
+  background: var(--paper);
+  color: var(--muted);
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+}
+.password-input button:hover {
+  color: var(--blue);
+  border-color: var(--blue);
+}
+.password-input button svg {
+  width: 14px;
+  height: 14px;
+}
+.generator-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.generator-row .field {
+  flex: 1;
+}
+.generator-row input[type="range"] {
+  width: 100%;
+  accent-color: var(--blue);
+}
+.generator-symbols {
+  height: 32px;
+  border: 1px solid var(--line);
+  background: var(--paper);
+  color: var(--muted);
+  font-size: 11px;
+  border-radius: 8px;
+  padding: 0 12px;
+  cursor: pointer;
+  margin-top: 14px;
+}
+.generator-symbols.on {
+  background: var(--blue-soft);
+  border-color: var(--blue);
+  color: var(--blue);
 }

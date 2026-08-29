@@ -1,11 +1,14 @@
 mod connectors;
 
+use aes_gcm::aead::{Aead, KeyInit};
+use aes_gcm::{Aes256Gcm, Nonce};
+use base64::Engine as _;
 use chrono::{DateTime, Local};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs,
     io::Read,
     path::{Component, Path, PathBuf},
@@ -53,6 +56,7 @@ struct FileEntry {
     modified_at: u64,
     favorite: bool,
     ocr_indexed: bool,
+    tags: Vec<String>,
 }
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -158,6 +162,20 @@ struct BootstrapData {
     settings: AppSettings,
     connectors: Vec<ConnectorStatus>,
     recent_files: Vec<FileEntry>,
+    passwords: Vec<PasswordEntry>,
+    all_tags: Vec<String>,
+}
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PasswordEntry {
+    id: String,
+    title: String,
+    url: String,
+    username: String,
+    notes: String,
+    group_tag: String,
+    created_at: u64,
+    updated_at: u64,
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -197,7 +215,9 @@ fn init_db(c: &Connection) -> rusqlite::Result<()> {
  CREATE TABLE IF NOT EXISTS sync_bindings(id TEXT PRIMARY KEY,local_path TEXT NOT NULL,provider TEXT NOT NULL,drive_id TEXT,remote_file_id TEXT,direction TEXT NOT NULL,schedule TEXT,enabled INTEGER NOT NULL DEFAULT 0);
  CREATE TABLE IF NOT EXISTS sync_jobs(id TEXT PRIMARY KEY,binding_id TEXT,state TEXT NOT NULL,detail TEXT,retries INTEGER DEFAULT 0,created_at INTEGER NOT NULL);
  CREATE TABLE IF NOT EXISTS remote_devices(id TEXT PRIMARY KEY,name TEXT NOT NULL,token_hash TEXT NOT NULL,permissions TEXT NOT NULL,revoked INTEGER DEFAULT 0,last_seen INTEGER);
- CREATE TABLE IF NOT EXISTS ai_jobs(id TEXT PRIMARY KEY,provider TEXT NOT NULL,task_type TEXT NOT NULL,relative_path TEXT,state TEXT NOT NULL,result TEXT,created_at INTEGER NOT NULL);"#)?;
+ CREATE TABLE IF NOT EXISTS ai_jobs(id TEXT PRIMARY KEY,provider TEXT NOT NULL,task_type TEXT NOT NULL,relative_path TEXT,state TEXT NOT NULL,result TEXT,created_at INTEGER NOT NULL);
+ CREATE TABLE IF NOT EXISTS password_entries(id TEXT PRIMARY KEY,title TEXT NOT NULL,url TEXT NOT NULL DEFAULT '',username TEXT NOT NULL DEFAULT '',password_enc TEXT NOT NULL DEFAULT '',notes TEXT NOT NULL DEFAULT '',group_tag TEXT NOT NULL DEFAULT '',created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL);
+ CREATE TABLE IF NOT EXISTS file_tags(relative_path TEXT NOT NULL,tag TEXT NOT NULL,UNIQUE(relative_path,tag));"#)?;
     let has_plan_scope = c
         .prepare("PRAGMA table_info(tasks)")?
         .query_map([], |row| row.get::<_, String>(1))?
@@ -218,6 +238,20 @@ fn init_db(c: &Connection) -> rusqlite::Result<()> {
         c.execute(
             "INSERT OR IGNORE INTO favorite_categories VALUES(?1,?2,?3,?4)",
             params![id, n, color, pos],
+        )?;
+    }
+    // Clean favorites rows stored with Windows verbatim path prefixes (\\?\D:\...).
+    let polluted: Vec<(String, String)> = c
+        .prepare("SELECT id, relative_path FROM favorites")?
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
+        .filter_map(Result::ok)
+        .filter(|(_, p)| p.starts_with(r"\\?\"))
+        .map(|(id, p)| (id, p.trim_start_matches(r"\\?\").replace('/', "\\")))
+        .collect();
+    for (id, clean) in polluted {
+        c.execute(
+            "UPDATE favorites SET relative_path=?1 WHERE id=?2",
+            params![clean, id],
         )?;
     }
     Ok(())
@@ -288,6 +322,15 @@ fn relative(root: &Path, p: &Path) -> String {
         .to_string_lossy()
         .replace('/', "\\")
 }
+fn simplify(p: PathBuf) -> PathBuf {
+    // Windows canonicalize() returns verbatim paths (\\?\D:\...) which leak into
+    // stored relative paths and break strip_prefix comparisons; strip the prefix.
+    let s = p.as_os_str().to_string_lossy();
+    match s.strip_prefix(r"\\?\") {
+        Some(rest) => PathBuf::from(rest.to_string()),
+        None => p,
+    }
+}
 fn safe(s: &AppState, r: &str) -> Result<PathBuf, String> {
     let p = Path::new(r);
     if !p.is_absolute()
@@ -323,7 +366,7 @@ fn safe(s: &AppState, r: &str) -> Result<PathBuf, String> {
     if top.as_deref().is_some_and(reserved) {
         return Err("应用程序目录不能作为工作区访问".into());
     }
-    Ok(candidate)
+    Ok(simplify(candidate))
 }
 fn hash(p: &Path) -> Result<String, String> {
     let mut f = fs::File::open(p).map_err(|e| e.to_string())?;
@@ -337,6 +380,57 @@ fn hash(p: &Path) -> Result<String, String> {
         h.update(&b[..n])
     }
     Ok(format!("{:x}", h.finalize()))
+}
+const VAULT_SERVICE: &str = "BEN Archive Assistant";
+const VAULT_ENTRY: &str = "vault-key";
+fn vault_key() -> Result<[u8; 32], String> {
+    use rand::RngCore;
+    let entry = keyring::Entry::new(VAULT_SERVICE, VAULT_ENTRY).map_err(|e| e.to_string())?;
+    match entry.get_password() {
+        Ok(v) => {
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(v.trim())
+                .map_err(|_| "密码本主密钥格式无效，请重新设置".to_string())?;
+            bytes
+                .try_into()
+                .map_err(|_| "密码本主密钥长度无效，请重新设置".to_string())
+        }
+        Err(keyring::Error::NoEntry) => {
+            let mut key = [0u8; 32];
+            rand::thread_rng().fill_bytes(&mut key);
+            entry
+                .set_password(&base64::engine::general_purpose::STANDARD.encode(key))
+                .map_err(|e| format!("无法写入 Windows 凭据管理器：{e}"))?;
+            Ok(key)
+        }
+        Err(e) => Err(format!("无法读取 Windows 凭据管理器：{e}")),
+    }
+}
+fn encrypt_password(key: &[u8; 32], plain: &str) -> Result<String, String> {
+    use rand::RngCore;
+    let cipher = Aes256Gcm::new_from_slice(key).map_err(|e| e.to_string())?;
+    let mut nonce_bytes = [0u8; 12];
+    rand::thread_rng().fill_bytes(&mut nonce_bytes);
+    let ct = cipher
+        .encrypt(Nonce::from_slice(&nonce_bytes), plain.as_bytes())
+        .map_err(|e| e.to_string())?;
+    let mut out = nonce_bytes.to_vec();
+    out.extend(ct);
+    Ok(base64::engine::general_purpose::STANDARD.encode(out))
+}
+fn decrypt_password(key: &[u8; 32], blob: &str) -> Result<String, String> {
+    let data = base64::engine::general_purpose::STANDARD
+        .decode(blob.trim())
+        .map_err(|_| "密码密文格式无效".to_string())?;
+    if data.len() < 13 {
+        return Err("密码密文不完整".into());
+    }
+    let (nonce_bytes, ct) = data.split_at(12);
+    let cipher = Aes256Gcm::new_from_slice(key).map_err(|e| e.to_string())?;
+    let plain = cipher
+        .decrypt(Nonce::from_slice(nonce_bytes), ct)
+        .map_err(|_| "密码解密失败".to_string())?;
+    String::from_utf8(plain).map_err(|_| "密码解码失败".to_string())
 }
 
 #[tauri::command]
@@ -357,7 +451,7 @@ fn open_file_with(state: State<AppState>, relative_path: String) -> Result<(), S
         return Err("只能为文件选择打开方式".into());
     }
     std::process::Command::new("rundll32.exe")
-        .arg("shell32.dll,OpenAs_RunDLL")
+        .arg("shell32.dll,OpenAs_RunDLLW")
         .arg(path)
         .spawn()
         .map(|_| ())
@@ -385,7 +479,7 @@ fn is_indexed(c: &Connection, p: &str) -> bool {
     .flatten()
     .is_some()
 }
-fn entry(s: &AppState, c: &Connection, p: &Path) -> Result<FileEntry, String> {
+fn entry(s: &AppState, c: &Connection, p: &Path, tags: &[String]) -> Result<FileEntry, String> {
     let m = p.metadata().map_err(|e| e.to_string())?;
     let r = relative(&s.root, p);
     Ok(FileEntry {
@@ -406,7 +500,21 @@ fn entry(s: &AppState, c: &Connection, p: &Path) -> Result<FileEntry, String> {
         modified_at: m.modified().map(ms).unwrap_or_default(),
         favorite: is_favorite(c, &r),
         ocr_indexed: is_indexed(c, &r),
+        tags: tags.to_vec(),
     })
+}
+fn tag_map(c: &Connection) -> HashMap<String, Vec<String>> {
+    let mut out: HashMap<String, Vec<String>> = HashMap::new();
+    if let Ok(mut stmt) = c.prepare("SELECT relative_path, tag FROM file_tags ORDER BY tag") {
+        if let Ok(rows) = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        }) {
+            for (p, t) in rows.filter_map(Result::ok) {
+                out.entry(p).or_default().push(t);
+            }
+        }
+    }
+    out
 }
 fn all_workspaces(s: &AppState) -> Result<Vec<Workspace>, String> {
     let mut out = vec![];
@@ -560,13 +668,17 @@ fn statuses(s: &AppSettings) -> Vec<ConnectorStatus> {
     ]
 }
 fn recent(s: &AppState, c: &Connection) -> Vec<FileEntry> {
+    let tags = tag_map(c);
     let mut out: Vec<_> = WalkDir::new(&s.root)
         .max_depth(12)
         .into_iter()
         .filter_entry(|e| e.depth() == 0 || !reserved(e.path()))
         .filter_map(Result::ok)
         .filter(|e| e.file_type().is_file() && !is_link(e.path()))
-        .filter_map(|e| entry(s, c, e.path()).ok())
+        .filter_map(|e| {
+            let r = relative(&s.root, e.path());
+            entry(s, c, e.path(), tags.get(&r).map(|v| v.as_slice()).unwrap_or(&[])).ok()
+        })
         .collect();
     out.sort_by_key(|item| std::cmp::Reverse(item.modified_at));
     out.truncate(20);
@@ -583,6 +695,16 @@ fn get_bootstrap(state: State<'_, AppState>) -> Result<BootstrapData, String> {
         tasks: plans(&c)?,
         connectors: statuses(&s),
         recent_files: recent(&state, &c),
+        passwords: password_list(&state)?,
+        all_tags: {
+            let mut stmt = c
+                .prepare("SELECT DISTINCT tag FROM file_tags ORDER BY tag")
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(|e| e.to_string())?;
+            rows.filter_map(Result::ok).collect()
+        },
         settings: s,
     })
 }
@@ -596,11 +718,13 @@ fn list_directory(
         return Err("目标不是文件夹".into());
     }
     let c = db(&state)?;
+    let tags = tag_map(&c);
     let mut out = vec![];
     for x in fs::read_dir(dir).map_err(|e| e.to_string())? {
         let p = x.map_err(|e| e.to_string())?.path();
         if !reserved(&p) && !is_link(&p) {
-            out.push(entry(&state, &c, &p)?);
+            let r = relative(&state.root, &p);
+            out.push(entry(&state, &c, &p, tags.get(&r).map(|v| v.as_slice()).unwrap_or(&[]))?);
         }
     }
     out.sort_by(|a, b| {
@@ -635,7 +759,7 @@ fn delete_workspace(
     if !workspace.is_dir() {
         return Err("目标不是工作区".into());
     }
-    let root = state.root.canonicalize().map_err(|e| e.to_string())?;
+    let root = simplify(state.root.canonicalize().map_err(|e| e.to_string())?);
     if workspace.parent() != Some(root.as_path()) {
         return Err("只能删除一级工作区".into());
     }
@@ -825,6 +949,10 @@ fn rename_entry(
         "UPDATE favorites SET relative_path=?1,display_name=?2 WHERE relative_path=?3",
         params![new, new_name, old],
     );
+    let _ = c.execute(
+        "UPDATE file_tags SET relative_path=?1 WHERE relative_path=?2",
+        params![new, old],
+    );
     log(&c, "rename", &format!("{old}->{new}"));
     Ok(OperationResult {
         success: true,
@@ -878,6 +1006,10 @@ fn transfer_many(
             "UPDATE favorites SET relative_path = CASE WHEN relative_path=?1 THEN ?2 ELSE ?2 || substr(relative_path, ?3) END WHERE relative_path=?1 OR substr(relative_path, 1, ?3)=?1 || '\\'",
             params![old, new, old_chars],
         );
+        let _ = c.execute(
+            "UPDATE file_tags SET relative_path = CASE WHEN relative_path=?1 THEN ?2 ELSE ?2 || substr(relative_path, ?3) END WHERE relative_path=?1 OR substr(relative_path, 1, ?3)=?1 || '\\'",
+            params![old, new, old_chars],
+        );
     }
     log(&c, &mode, &format!("{} item(s)->{target}", affected.len()));
     let message = if skipped.is_empty() {
@@ -926,7 +1058,7 @@ fn import_files(
         if !p.is_absolute() || !p.exists() {
             return Err("选择的导入文件不存在".into());
         }
-        sources.push(p.canonicalize().map_err(|e| e.to_string())?)
+        sources.push(simplify(p.canonicalize().map_err(|e| e.to_string())?))
     }
     transfer_many(&state, sources, target_path, mode)
 }
@@ -946,6 +1078,12 @@ fn delete_entries(
         affected.push(r)
     }
     let c = db(&state)?;
+    for r in &affected {
+        let _ = c.execute(
+            "DELETE FROM file_tags WHERE relative_path=?1 OR substr(relative_path,1,?2)=?1 || '\\'",
+            params![r, r.chars().count() as i64 + 1],
+        );
+    }
     log(&c, "trash", &affected.join(";"));
     Ok(OperationResult {
         success: true,
@@ -982,7 +1120,7 @@ fn search_files(state: State<'_, AppState>, query: String) -> Result<Vec<FileEnt
             .contains(&query)
             || indexed.contains(&r)
         {
-            out.push(entry(&state, &c, x.path())?);
+            out.push(entry(&state, &c, x.path(), &[])?);
             if out.len() >= 100 {
                 break;
             }
@@ -1037,7 +1175,7 @@ fn list_ocr_candidates(
                 .optional()
                 .map_err(|e| e.to_string())?;
             if stored.as_deref() != Some(hash(item.path())?.as_str()) {
-                out.push(entry(&state, &c, item.path())?);
+                out.push(entry(&state, &c, item.path(), &[])?);
             }
         }
     }
@@ -1128,16 +1266,18 @@ fn add_favorites_from_paths(
     }
     drop(c);
 
-    let root = state.root.canonicalize().map_err(|e| e.to_string())?;
+    let root = simplify(state.root.canonicalize().map_err(|e| e.to_string())?);
     let import_dir = state.root.join("收藏导入");
     let mut affected = vec![];
     let mut skipped = vec![];
     for raw in source_paths {
         let raw_path = PathBuf::from(&raw);
         let source = if raw_path.is_absolute() {
-            raw_path
-                .canonicalize()
-                .map_err(|_| format!("文件不存在：{raw}"))?
+            simplify(
+                raw_path
+                    .canonicalize()
+                    .map_err(|_| format!("文件不存在：{raw}"))?,
+            )
         } else {
             safe(&state, &raw)?
         };
@@ -1199,6 +1339,200 @@ fn add_favorites_from_paths(
         },
         affected,
         skipped,
+    })
+}
+fn password_list(state: &State<'_, AppState>) -> Result<Vec<PasswordEntry>, String> {
+    let c = db(state)?;
+    let mut stmt = c
+        .prepare(
+            "SELECT id,title,url,username,notes,group_tag,created_at,updated_at
+             FROM password_entries ORDER BY updated_at DESC",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(PasswordEntry {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                url: row.get(2)?,
+                username: row.get(3)?,
+                notes: row.get(4)?,
+                group_tag: row.get(5)?,
+                created_at: row.get::<_, i64>(6)?.max(0) as u64,
+                updated_at: row.get::<_, i64>(7)?.max(0) as u64,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    Ok(rows.filter_map(Result::ok).collect())
+}
+fn valid_tag(t: &str) -> Result<String, String> {
+    let tag = t.trim();
+    if tag.is_empty() || tag.chars().count() > 24 {
+        return Err("标签需为 1–24 个字符".into());
+    }
+    if tag.contains(',') || tag.contains('\n') {
+        return Err("标签不能包含逗号或换行".into());
+    }
+    Ok(tag.to_string())
+}
+#[tauri::command]
+fn save_password_entry(
+    state: State<'_, AppState>,
+    id: Option<String>,
+    title: String,
+    url: Option<String>,
+    username: Option<String>,
+    password: Option<String>,
+    notes: Option<String>,
+    group_tag: Option<String>,
+) -> Result<Vec<PasswordEntry>, String> {
+    let title = title.trim();
+    if title.is_empty() || title.chars().count() > 120 {
+        return Err("标题需为 1–120 个字符".into());
+    }
+    let now = ms(SystemTime::now());
+    let c = db(&state)?;
+    match id.filter(|v| !v.trim().is_empty()) {
+        Some(id) => {
+            let exists = c
+                .query_row(
+                    "SELECT password_enc FROM password_entries WHERE id=?1",
+                    [&id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(|e| e.to_string())?;
+            let Some(existing_enc) = exists else {
+                return Err("该密码条目不存在".into());
+            };
+            let enc = match password.filter(|v| !v.is_empty()) {
+                Some(plain) => encrypt_password(&vault_key()?, &plain)?,
+                None => existing_enc,
+            };
+            c.execute(
+                "UPDATE password_entries SET title=?1,url=?2,username=?3,password_enc=?4,notes=?5,group_tag=?6,updated_at=?7 WHERE id=?8",
+                params![
+                    title.trim(),
+                    url.unwrap_or_default().trim(),
+                    username.unwrap_or_default(),
+                    enc,
+                    notes.unwrap_or_default(),
+                    group_tag.unwrap_or_default().trim(),
+                    now,
+                    id
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        None => {
+            let plain = password.unwrap_or_default();
+            let enc = if plain.is_empty() {
+                String::new()
+            } else {
+                encrypt_password(&vault_key()?, &plain)?
+            };
+            c.execute(
+                "INSERT INTO password_entries VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                params![
+                    Uuid::new_v4().to_string(),
+                    title.trim(),
+                    url.unwrap_or_default().trim(),
+                    username.unwrap_or_default(),
+                    enc,
+                    notes.unwrap_or_default(),
+                    group_tag.unwrap_or_default().trim(),
+                    now,
+                    now
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+    }
+    log(&c, "password-save", title);
+    password_list(&state)
+}
+#[tauri::command]
+fn delete_password_entry(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Vec<PasswordEntry>, String> {
+    let c = db(&state)?;
+    c.execute("DELETE FROM password_entries WHERE id=?1", [&id])
+        .map_err(|e| e.to_string())?;
+    log(&c, "password-delete", &id);
+    password_list(&state)
+}
+#[tauri::command]
+fn reveal_password(state: State<'_, AppState>, id: String) -> Result<String, String> {
+    let c = db(&state)?;
+    let enc = c
+        .query_row(
+            "SELECT password_enc FROM password_entries WHERE id=?1",
+            [&id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    let Some(enc) = enc else {
+        return Err("该密码条目不存在".into());
+    };
+    if enc.is_empty() {
+        return Ok(String::new());
+    }
+    decrypt_password(&vault_key()?, &enc)
+}
+#[tauri::command]
+fn add_file_tags(
+    state: State<'_, AppState>,
+    relative_paths: Vec<String>,
+    tag: String,
+) -> Result<OperationResult, String> {
+    let tag = valid_tag(&tag)?;
+    let c = db(&state)?;
+    let mut affected = vec![];
+    for p in relative_paths {
+        let path = safe(&state, &p)?;
+        let r = relative(&state.root, &path);
+        c.execute(
+            "INSERT OR IGNORE INTO file_tags(relative_path,tag) VALUES(?1,?2)",
+            params![r, tag],
+        )
+        .map_err(|e| e.to_string())?;
+        affected.push(r);
+    }
+    log(&c, "tag-add", &format!("{tag} -> {} item(s)", affected.len()));
+    Ok(OperationResult {
+        success: true,
+        message: format!("已为 {} 个项目添加标签“{tag}”", affected.len()),
+        affected,
+        skipped: vec![],
+    })
+}
+#[tauri::command]
+fn remove_file_tags(
+    state: State<'_, AppState>,
+    relative_paths: Vec<String>,
+    tag: String,
+) -> Result<OperationResult, String> {
+    let tag = valid_tag(&tag)?;
+    let c = db(&state)?;
+    let mut affected = vec![];
+    for p in relative_paths {
+        let path = safe(&state, &p)?;
+        let r = relative(&state.root, &path);
+        c.execute(
+            "DELETE FROM file_tags WHERE relative_path=?1 AND tag=?2",
+            params![r, tag],
+        )
+        .map_err(|e| e.to_string())?;
+        affected.push(r);
+    }
+    log(&c, "tag-remove", &format!("{tag} <- {} item(s)", affected.len()));
+    Ok(OperationResult {
+        success: true,
+        message: format!("已从 {} 个项目移除标签“{tag}”", affected.len()),
+        affected,
+        skipped: vec![],
     })
 }
 #[tauri::command]
@@ -1444,7 +1778,12 @@ pub fn run() {
             read_file_bytes,
             get_file_hash,
             open_file,
-            open_file_with
+            open_file_with,
+            save_password_entry,
+            delete_password_entry,
+            reveal_password,
+            add_file_tags,
+            remove_file_tags
         ])
         .run(tauri::generate_context!())
         .expect("归档助手启动失败")
@@ -1461,6 +1800,21 @@ mod tests {
         for invalid in ["", "CON", "a/b", "a*", "结尾.", "结尾 "] {
             assert!(valid_name(invalid).is_err(), "{invalid} 应被拒绝");
         }
+    }
+
+    #[test]
+    fn vault_encryption_roundtrips() {
+        use rand::RngCore;
+        let mut key = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut key);
+        let blob = encrypt_password(&key, "P@ss中文123").unwrap();
+        assert_ne!(blob, "P@ss中文123");
+        assert_eq!(decrypt_password(&key, &blob).unwrap(), "P@ss中文123");
+        let mut other = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut other);
+        assert!(decrypt_password(&other, &blob).is_err());
+        assert!(valid_tag("").is_err());
+        assert!(valid_tag("  工作  ").map(|t| t == "工作").unwrap_or(false));
     }
 
     #[test]
@@ -1496,11 +1850,16 @@ mod tests {
         };
         assert_eq!(
             safe(&state, "技术工作\\报告.docx").expect("接受相对路径"),
-            file.canonicalize().expect("规范化文件")
+            simplify(file.canonicalize().expect("规范化文件"))
         );
         assert_eq!(
             safe(&state, &file.to_string_lossy()).expect("接受根目录内绝对路径"),
-            file.canonicalize().expect("规范化文件")
+            simplify(file.canonicalize().expect("规范化文件"))
+        );
+        let simplified = safe(&state, "技术工作\\报告.docx").expect("接受相对路径");
+        assert!(
+            !simplified.to_string_lossy().starts_with(r"\\?\"),
+            "返回路径不应包含 verbatim 前缀"
         );
         let outside = tempfile::NamedTempFile::new().expect("创建外部文件");
         assert!(safe(&state, &outside.path().to_string_lossy()).is_err());

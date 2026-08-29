@@ -7,6 +7,7 @@ import type {
   FileEntry,
   OcrResult,
   OperationResult,
+  PasswordEntry,
   PlanTask,
 } from "../types";
 
@@ -25,6 +26,8 @@ const demoBootstrap = (): BootstrapData => ({
   favorites: [],
   tasks: [],
   recentFiles: [],
+  passwords: [],
+  allTags: [],
   settings: {
     storageRoot: "D:\\自动归档",
     theme: "light",
@@ -222,4 +225,67 @@ export const api = {
   openFile: (relativePath: string) => call<void>("open_file", { relativePath }),
   openFileWith: (relativePath: string) =>
     call<void>("open_file_with", { relativePath }),
+  savePasswordEntry: (entry: {
+    id?: string;
+    title: string;
+    url?: string;
+    username?: string;
+    password?: string;
+    notes?: string;
+    groupTag?: string;
+  }) =>
+    call<PasswordEntry[]>(
+      "save_password_entry",
+      {
+        id: entry.id,
+        title: entry.title,
+        url: entry.url,
+        username: entry.username,
+        password: entry.password,
+        notes: entry.notes,
+        groupTag: entry.groupTag,
+      },
+      () => {
+        const now = Date.now();
+        const next: PasswordEntry = {
+          id: entry.id ?? crypto.randomUUID(),
+          title: entry.title,
+          url: entry.url ?? "",
+          username: entry.username ?? "",
+          notes: entry.notes ?? "",
+          groupTag: entry.groupTag ?? "",
+          createdAt: now,
+          updatedAt: now,
+        };
+        const index = browserState.passwords.findIndex(
+          (item) => item.id === next.id,
+        );
+        if (index >= 0) browserState.passwords[index] = next;
+        else browserState.passwords.unshift(next);
+        persistBrowserState();
+        return structuredClone(browserState.passwords);
+      },
+    ),
+  deletePasswordEntry: (id: string) =>
+    call<PasswordEntry[]>("delete_password_entry", { id }, () => {
+      browserState.passwords = browserState.passwords.filter(
+        (item) => item.id !== id,
+      );
+      persistBrowserState();
+      return structuredClone(browserState.passwords);
+    }),
+  revealPassword: (id: string) =>
+    call<string>("reveal_password", { id }, () => ""),
+  addFileTags: (relativePaths: string[], tag: string) =>
+    call<OperationResult>(
+      "add_file_tags",
+      { relativePaths, tag },
+      () => ({ success: true, message: "", affected: [], skipped: [] }),
+    ),
+  removeFileTags: (relativePaths: string[], tag: string) =>
+    call<OperationResult>(
+      "remove_file_tags",
+      { relativePaths, tag },
+      () => ({ success: true, message: "", affected: [], skipped: [] }),
+    ),
 };
