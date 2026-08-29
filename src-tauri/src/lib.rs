@@ -462,6 +462,21 @@ fn open_file_with(state: State<AppState>, relative_path: String) -> Result<(), S
         .map(|_| ())
         .map_err(|error| format!("无法显示 Windows 打开方式：{error}"))
 }
+
+#[tauri::command]
+fn reveal_in_explorer(
+    app: AppHandle,
+    state: State<AppState>,
+    relative_path: String,
+) -> Result<(), String> {
+    let path = safe(&state, &relative_path)?;
+    if !path.exists() {
+        return Err("文件或文件夹不存在".into());
+    }
+    app.opener()
+        .reveal_item_in_dir(&path)
+        .map_err(|error| format!("无法在资源管理器中定位：{error}"))
+}
 fn is_favorite(c: &Connection, p: &str) -> bool {
     c.query_row(
         "SELECT 1 FROM favorites WHERE relative_path=?1 LIMIT 1",
@@ -1911,6 +1926,7 @@ pub fn run() {
             get_file_hash,
             open_file,
             open_file_with,
+            reveal_in_explorer,
             save_password_entry,
             delete_password_entry,
             reveal_password,

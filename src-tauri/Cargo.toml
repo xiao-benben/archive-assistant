@@ -1,6 +1,6 @@
 [package]
 name = "archive-assistant"
-version = "0.2.2"
+version = "0.2.3"
 description = "BEN 的本地智能归档助手"
 authors = ["BEN"]
 edition = "2021"

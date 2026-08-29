@@ -227,6 +227,8 @@ export const api = {
   openFile: (relativePath: string) => call<void>("open_file", { relativePath }),
   openFileWith: (relativePath: string) =>
     call<void>("open_file_with", { relativePath }),
+  revealInExplorer: (relativePath: string) =>
+    call<void>("reveal_in_explorer", { relativePath }),
   savePasswordEntry: (entry: {
     id?: string;
     title: string;

@@ -41,6 +41,7 @@ import {
   Folder,
   FolderOpen,
   FolderPlus,
+  FolderSearch,
   Heart,
   Home,
   Import,
@@ -871,6 +872,13 @@ export default function App() {
                   `已移除标签“${tag}”`,
                 )
               }
+              reveal={(entry) => {
+                if (!isTauri())
+                  return tell("请在桌面应用中定位本机文件", true);
+                api
+                  .revealInExplorer(entry.relativePath)
+                  .catch((error) => tell(message(error), true));
+              }}
             />
           )}
           {view === "favorites" && (
@@ -1344,6 +1352,7 @@ function FilesPage({
   toggleSelectAll,
   addTag,
   removeTag,
+  reveal,
 }: {
   path: string;
   files: FileEntry[];
@@ -1367,6 +1376,7 @@ function FilesPage({
   toggleSelectAll: () => void;
   addTag: (entry: FileEntry, tag: string) => void;
   removeTag: (entry: FileEntry, tag: string) => void;
+  reveal: (entry: FileEntry) => void;
 }) {
   const parts = path.split("\\").filter(Boolean);
   const ocr =
@@ -1604,6 +1614,18 @@ function FilesPage({
                     {file.isDirectory ? "—" : bytes(file.size)}
                   </span>
                   <time>{dateTime(file.modifiedAt)}</time>
+                  <button
+                    type="button"
+                    className="row-reveal"
+                    aria-label="打开所在位置"
+                    title="打开所在位置"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      reveal(file);
+                    }}
+                  >
+                    <FolderSearch />
+                  </button>
                 </div>
               ),
             )
@@ -1673,6 +1695,10 @@ function FilesPage({
               <button onClick={() => open(one)}>
                 <FolderOpen />
                 默认程序打开
+              </button>
+              <button onClick={() => reveal(one)}>
+                <FolderSearch />
+                打开所在位置
               </button>
               {!one.isDirectory && (
                 <button onClick={() => openWith(one)}>
@@ -2228,9 +2254,16 @@ function FavoritesPage({
                 <div
                   className={`favorite-card ${f.missing ? "missing" : ""}`}
                   key={f.id}
-                  onClick={() => openFile(f)}
+                  onClick={() => !f.missing && openFile(f)}
                   title={f.missing ? "原文件位置失效" : "单击打开文件"}
                 >
+                  <span className="file-icon">
+                    <FileText />
+                  </span>
+                  <strong>
+                    {f.displayName}
+                    {f.missing && <em className="missing-tag">已失效</em>}
+                  </strong>
                   {!f.missing && (
                     <span className="favorite-card-actions">
                       <button
@@ -2257,12 +2290,6 @@ function FavoritesPage({
                       </button>
                     </span>
                   )}
-                  <span className="file-icon">
-                    <FileText />
-                  </span>
-                  <strong>{f.displayName}</strong>
-                  <small>{f.missing ? "原文件位置失效" : f.relativePath}</small>
-                  <ChevronRight />
                 </div>
               ))}
             </div>
@@ -2654,7 +2681,12 @@ function SmartPage({
       </div>
       <div className="connector-grid">
         {data.connectors.map((c) => (
-          <article key={c.id}>
+          <article
+            key={c.id}
+            className={c.id === "wps" ? "clickable" : ""}
+            onClick={c.id === "wps" ? settings : undefined}
+            title={c.id === "wps" ? "前往设置开启 WPS 云盘同步" : undefined}
+          >
             <span className={`connector-icon ${c.id}`}>
               {c.id === "model" ? (
                 <Bot />
@@ -2675,6 +2707,7 @@ function SmartPage({
             <em className={c.state}>
               {c.state === "ready" ? "可用" : "已预留"}
             </em>
+            {c.id === "wps" && <ChevronRight />}
           </article>
         ))}
       </div>
@@ -2816,6 +2849,83 @@ function SettingsPage({
         </section>
         <section className="settings-section">
           <div className="settings-title">
+            <Cloud />
+            <div>
+              <h2>WPS 云盘同步</h2>
+              <p>归档文件复制进 WPS 同步目录，由 WPS 客户端上传云端。</p>
+            </div>
+            <span
+              className={`status-dot ${
+                draft.wpsSyncDir && draft.wpsSyncWorkspaces.length
+                  ? "ready"
+                  : ""
+              }`}
+            >
+              {draft.wpsSyncDir && draft.wpsSyncWorkspaces.length
+                ? "已配置"
+                : "未配置"}
+            </span>
+          </div>
+          <label className="field">
+            <span>WPS 同步目录</span>
+            <div className="locked-input">
+              {draft.wpsSyncDir ?? "未选择 WPS 同步目录"}
+              <ShieldCheck />
+            </div>
+          </label>
+          <div className="field-row">
+            <button className="button light" disabled={syncing} onClick={pickWpsDir}>
+              <FolderOpen />
+              {draft.wpsSyncDir ? "重新选择目录" : "选择 WPS 同步目录"}
+            </button>
+            <button
+              className="button primary"
+              disabled={syncing || !draft.wpsSyncDir}
+              onClick={syncNow}
+            >
+              <RefreshCw />
+              立即同步
+            </button>
+          </div>
+          {draft.wpsSyncDir ? (
+            data.workspaces.length ? (
+              data.workspaces.map((workspace) => (
+                <Toggle
+                  key={workspace.id}
+                  title={workspace.name}
+                  text="归档到该工作区的文件将自动复制进 WPS 同步目录"
+                  value={draft.wpsSyncWorkspaces.includes(workspace.relativePath)}
+                  change={(enabled) =>
+                    setDraft({
+                      ...draft,
+                      wpsSyncWorkspaces: enabled
+                        ? [...draft.wpsSyncWorkspaces, workspace.relativePath]
+                        : draft.wpsSyncWorkspaces.filter(
+                            (path) => path !== workspace.relativePath,
+                          ),
+                    })
+                  }
+                />
+              ))
+            ) : (
+              <div className="privacy-note">
+                <FolderPlus />
+                创建工作区后，可以在这里开启云同步。
+              </div>
+            )
+          ) : (
+            <div className="privacy-note">
+              <FolderPlus />
+              先在 WPS 客户端开启云文档同步，再选择它的本地同步目录。
+            </div>
+          )}
+          <div className="privacy-note">
+            <ShieldCheck />
+            需要 WPS 客户端保持登录并开启云同步。首版只同步新增和更新的文件，删除与重命名不会反映到云端。
+          </div>
+        </section>
+        <section className="settings-section">
+          <div className="settings-title">
             <Bot />
             <div>
               <h2>大模型</h2>
@@ -2898,83 +3008,6 @@ function SettingsPage({
               创建工作区后，可以在这里启用自动识别。
             </div>
           )}
-        </section>
-        <section className="settings-section">
-          <div className="settings-title">
-            <Cloud />
-            <div>
-              <h2>WPS 云盘同步</h2>
-              <p>归档文件复制进 WPS 同步目录，由 WPS 客户端上传云端。</p>
-            </div>
-            <span
-              className={`status-dot ${
-                draft.wpsSyncDir && draft.wpsSyncWorkspaces.length
-                  ? "ready"
-                  : ""
-              }`}
-            >
-              {draft.wpsSyncDir && draft.wpsSyncWorkspaces.length
-                ? "已配置"
-                : "未配置"}
-            </span>
-          </div>
-          <label className="field">
-            <span>WPS 同步目录</span>
-            <div className="locked-input">
-              {draft.wpsSyncDir ?? "未选择 WPS 同步目录"}
-              <ShieldCheck />
-            </div>
-          </label>
-          <div className="field-row">
-            <button className="button light" disabled={syncing} onClick={pickWpsDir}>
-              <FolderOpen />
-              {draft.wpsSyncDir ? "重新选择目录" : "选择 WPS 同步目录"}
-            </button>
-            <button
-              className="button primary"
-              disabled={syncing || !draft.wpsSyncDir}
-              onClick={syncNow}
-            >
-              <RefreshCw />
-              立即同步
-            </button>
-          </div>
-          {draft.wpsSyncDir ? (
-            data.workspaces.length ? (
-              data.workspaces.map((workspace) => (
-                <Toggle
-                  key={workspace.id}
-                  title={workspace.name}
-                  text="归档到该工作区的文件将自动复制进 WPS 同步目录"
-                  value={draft.wpsSyncWorkspaces.includes(workspace.relativePath)}
-                  change={(enabled) =>
-                    setDraft({
-                      ...draft,
-                      wpsSyncWorkspaces: enabled
-                        ? [...draft.wpsSyncWorkspaces, workspace.relativePath]
-                        : draft.wpsSyncWorkspaces.filter(
-                            (path) => path !== workspace.relativePath,
-                          ),
-                    })
-                  }
-                />
-              ))
-            ) : (
-              <div className="privacy-note">
-                <FolderPlus />
-                创建工作区后，可以在这里开启云同步。
-              </div>
-            )
-          ) : (
-            <div className="privacy-note">
-              <FolderPlus />
-              先在 WPS 客户端开启云文档同步，再选择它的本地同步目录。
-            </div>
-          )}
-          <div className="privacy-note">
-            <ShieldCheck />
-            需要 WPS 客户端保持登录并开启云同步。首版只同步新增和更新的文件，删除与重命名不会反映到云端。
-          </div>
         </section>
         <section className="settings-section">
           <div className="settings-title">
