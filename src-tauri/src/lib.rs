@@ -707,7 +707,7 @@ fn get_bootstrap(state: State<'_, AppState>) -> Result<BootstrapData, String> {
         tasks: plans(&c)?,
         connectors: statuses(&s),
         recent_files: recent(&state, &c),
-        passwords: password_list(&state)?,
+        passwords: password_list(&c)?,
         all_tags: {
             let mut stmt = c
                 .prepare("SELECT DISTINCT tag FROM file_tags ORDER BY tag")
@@ -1390,8 +1390,7 @@ fn add_favorites_from_paths(
         skipped,
     })
 }
-fn password_list(state: &State<'_, AppState>) -> Result<Vec<PasswordEntry>, String> {
-    let c = db(state)?;
+fn password_list(c: &Connection) -> Result<Vec<PasswordEntry>, String> {
     let mut stmt = c
         .prepare(
             "SELECT id,title,url,username,notes,group_tag,created_at,updated_at
@@ -1498,7 +1497,7 @@ fn save_password_entry(
         }
     }
     log(&c, "password-save", title);
-    password_list(&state)
+    password_list(&c)
 }
 #[tauri::command]
 fn delete_password_entry(
@@ -1509,7 +1508,7 @@ fn delete_password_entry(
     c.execute("DELETE FROM password_entries WHERE id=?1", [&id])
         .map_err(|e| e.to_string())?;
     log(&c, "password-delete", &id);
-    password_list(&state)
+    password_list(&c)
 }
 #[tauri::command]
 fn reveal_password(state: State<'_, AppState>, id: String) -> Result<String, String> {
