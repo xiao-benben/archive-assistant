@@ -41,6 +41,8 @@ const demoBootstrap = (): BootstrapData => ({
     quietStart: "22:00",
     quietEnd: "07:30",
     mobileEnabled: false,
+    wpsSyncDir: null,
+    wpsSyncWorkspaces: [],
   },
   connectors: [
     {
@@ -60,7 +62,7 @@ const demoBootstrap = (): BootstrapData => ({
     {
       id: "wps",
       name: "WPS 云文档",
-      description: "选择性双向同步",
+      description: "归档文件同步到 WPS 云盘",
       state: "reserved",
       enabled: false,
     },
@@ -288,4 +290,13 @@ export const api = {
       { relativePaths, tag },
       () => ({ success: true, message: "", affected: [], skipped: [] }),
     ),
+  validateWpsDir: (path: string) =>
+    call<string>("validate_wps_dir", { path }, () => path),
+  wpsSyncNow: (workspace?: string) =>
+    call<OperationResult>("wps_sync_now", { workspace }, () => ({
+      success: true,
+      message: "浏览器预览不支持云盘同步",
+      affected: [],
+      skipped: [],
+    })),
 };

@@ -945,6 +945,7 @@ export default function App() {
               save={(value, key) =>
                 action(() => api.saveSettings(value, key), "设置已安全保存")
               }
+              notify={tell}
             />
           )}
         </div>
@@ -2685,13 +2686,41 @@ function SettingsPage({
   value,
   data,
   save,
+  notify,
 }: {
   value: AppSettings;
   data: BootstrapData;
   save: (v: AppSettings, key?: string) => void;
+  notify: (text: string, error?: boolean) => void;
 }) {
   const [draft, setDraft] = useState(value);
   const [key, setKey] = useState("");
+  const [syncing, setSyncing] = useState(false);
+  const pickWpsDir = async () => {
+    try {
+      const picked = await open({ directory: true, multiple: false });
+      if (typeof picked !== "string") return;
+      setSyncing(true);
+      const validated = await api.validateWpsDir(picked);
+      setDraft({ ...draft, wpsSyncDir: validated });
+      notify("WPS 同步目录已选择，保存设置后生效");
+    } catch (e) {
+      notify(message(e), true);
+    } finally {
+      setSyncing(false);
+    }
+  };
+  const syncNow = async () => {
+    setSyncing(true);
+    try {
+      const result = await api.wpsSyncNow();
+      notify(result.message || "同步完成");
+    } catch (e) {
+      notify(message(e), true);
+    } finally {
+      setSyncing(false);
+    }
+  };
   return (
     <div className="page settings-page">
       <Heading
@@ -2869,6 +2898,83 @@ function SettingsPage({
               创建工作区后，可以在这里启用自动识别。
             </div>
           )}
+        </section>
+        <section className="settings-section">
+          <div className="settings-title">
+            <Cloud />
+            <div>
+              <h2>WPS 云盘同步</h2>
+              <p>归档文件复制进 WPS 同步目录，由 WPS 客户端上传云端。</p>
+            </div>
+            <span
+              className={`status-dot ${
+                draft.wpsSyncDir && draft.wpsSyncWorkspaces.length
+                  ? "ready"
+                  : ""
+              }`}
+            >
+              {draft.wpsSyncDir && draft.wpsSyncWorkspaces.length
+                ? "已配置"
+                : "未配置"}
+            </span>
+          </div>
+          <label className="field">
+            <span>WPS 同步目录</span>
+            <div className="locked-input">
+              {draft.wpsSyncDir ?? "未选择 WPS 同步目录"}
+              <ShieldCheck />
+            </div>
+          </label>
+          <div className="field-row">
+            <button className="button light" disabled={syncing} onClick={pickWpsDir}>
+              <FolderOpen />
+              {draft.wpsSyncDir ? "重新选择目录" : "选择 WPS 同步目录"}
+            </button>
+            <button
+              className="button primary"
+              disabled={syncing || !draft.wpsSyncDir}
+              onClick={syncNow}
+            >
+              <RefreshCw />
+              立即同步
+            </button>
+          </div>
+          {draft.wpsSyncDir ? (
+            data.workspaces.length ? (
+              data.workspaces.map((workspace) => (
+                <Toggle
+                  key={workspace.id}
+                  title={workspace.name}
+                  text="归档到该工作区的文件将自动复制进 WPS 同步目录"
+                  value={draft.wpsSyncWorkspaces.includes(workspace.relativePath)}
+                  change={(enabled) =>
+                    setDraft({
+                      ...draft,
+                      wpsSyncWorkspaces: enabled
+                        ? [...draft.wpsSyncWorkspaces, workspace.relativePath]
+                        : draft.wpsSyncWorkspaces.filter(
+                            (path) => path !== workspace.relativePath,
+                          ),
+                    })
+                  }
+                />
+              ))
+            ) : (
+              <div className="privacy-note">
+                <FolderPlus />
+                创建工作区后，可以在这里开启云同步。
+              </div>
+            )
+          ) : (
+            <div className="privacy-note">
+              <FolderPlus />
+              先在 WPS 客户端开启云文档同步，再选择它的本地同步目录。
+            </div>
+          )}
+          <div className="privacy-note">
+            <ShieldCheck />
+            需要 WPS 客户端保持登录并开启云同步。首版只同步新增和更新的文件，删除与重命名不会反映到云端。
+          </div>
         </section>
         <section className="settings-section">
           <div className="settings-title">

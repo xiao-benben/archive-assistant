@@ -1,4 +1,5 @@
 mod connectors;
+mod wps_sync;
 
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce};
@@ -122,6 +123,8 @@ struct AppSettings {
     quiet_start: String,
     quiet_end: String,
     mobile_enabled: bool,
+    wps_sync_dir: Option<String>,
+    wps_sync_workspaces: Vec<String>,
 }
 impl Default for AppSettings {
     fn default() -> Self {
@@ -140,6 +143,8 @@ impl Default for AppSettings {
             quiet_start: "22:00".into(),
             quiet_end: "07:30".into(),
             mobile_enabled: false,
+            wps_sync_dir: None,
+            wps_sync_workspaces: vec![],
         }
     }
 }
@@ -322,7 +327,7 @@ fn relative(root: &Path, p: &Path) -> String {
         .to_string_lossy()
         .replace('/', "\\")
 }
-fn simplify(p: PathBuf) -> PathBuf {
+pub(crate) fn simplify(p: PathBuf) -> PathBuf {
     // Windows canonicalize() returns verbatim paths (\\?\D:\...) which leak into
     // stored relative paths and break strip_prefix comparisons; strip the prefix.
     let s = p.as_os_str().to_string_lossy();
@@ -368,7 +373,7 @@ fn safe(s: &AppState, r: &str) -> Result<PathBuf, String> {
     }
     Ok(simplify(candidate))
 }
-fn hash(p: &Path) -> Result<String, String> {
+pub(crate) fn hash(p: &Path) -> Result<String, String> {
     let mut f = fs::File::open(p).map_err(|e| e.to_string())?;
     let mut h = Sha256::new();
     let mut b = [0u8; 65536];
@@ -647,9 +652,16 @@ fn statuses(s: &AppSettings) -> Vec<ConnectorStatus> {
         ConnectorStatus {
             id: "wps".into(),
             name: "WPS 云文档".into(),
-            description: "选择性双向同步".into(),
-            state: "reserved".into(),
-            enabled: false,
+            description: "归档文件同步到 WPS 云盘".into(),
+            state: if s.wps_sync_dir.is_some()
+                && !s.wps_sync_workspaces.is_empty()
+            {
+                "ready"
+            } else {
+                "reserved"
+            }
+            .into(),
+            enabled: s.wps_sync_dir.is_some() && !s.wps_sync_workspaces.is_empty(),
         },
         ConnectorStatus {
             id: "wechat".into(),
@@ -785,7 +797,7 @@ fn create_folder(
     list_directory(state, parent_path)
 }
 
-fn unique(dir: &Path, name: &str) -> PathBuf {
+pub(crate) fn unique(dir: &Path, name: &str) -> PathBuf {
     let p = dir.join(name);
     if !p.exists() {
         return p;
@@ -804,7 +816,7 @@ fn unique(dir: &Path, name: &str) -> PathBuf {
     }
     dir.join(format!("{stem}_{}{ext}", Uuid::new_v4()))
 }
-fn dated(p: &Path, label: &str, time: SystemTime) -> String {
+pub(crate) fn dated(p: &Path, label: &str, time: SystemTime) -> String {
     let d: DateTime<Local> = time.into();
     let stem = p.file_stem().unwrap_or_default().to_string_lossy();
     let ext = p
@@ -1012,6 +1024,7 @@ fn transfer_many(
         );
     }
     log(&c, &mode, &format!("{} item(s)->{target}", affected.len()));
+    sync_affected_to_wps(s, &c, &affected);
     let message = if skipped.is_empty() {
         format!(
             "已{} {} 个项目",
@@ -1031,6 +1044,42 @@ fn transfer_many(
         affected,
         skipped,
     })
+}
+fn sync_affected_to_wps(s: &AppState, c: &Connection, affected: &[String]) {
+    let settings = load_settings(c);
+    let Some(dir) = settings.wps_sync_dir.clone() else {
+        return;
+    };
+    if settings.wps_sync_workspaces.is_empty() {
+        return;
+    }
+    let wps = PathBuf::from(&dir);
+    let mut synced = 0usize;
+    for path in affected {
+        let Some(workspace) = Path::new(path).components().next() else {
+            continue;
+        };
+        let workspace = workspace.as_os_str().to_string_lossy().to_string();
+        if !settings
+            .wps_sync_workspaces
+            .iter()
+            .any(|w| w == &workspace)
+        {
+            continue;
+        }
+        match wps_sync::sync_file(&s.root, &wps, path) {
+            Ok(true) => synced += 1,
+            Ok(false) => {}
+            Err(e) => log(c, "wps-sync-failed", &format!("{path}：{e}")),
+        }
+    }
+    if synced > 0 {
+        log(
+            c,
+            "wps-sync",
+            &format!("{synced} 个文件已复制到 WPS 同步目录"),
+        );
+    }
 }
 #[tauri::command]
 fn transfer_entries(
@@ -1589,6 +1638,16 @@ fn save_settings(
             .map_err(|e| format!("保存 API 密钥失败：{e}"))?;
         settings.model_key_saved = true
     }
+    settings.wps_sync_dir = match settings.wps_sync_dir.as_deref().map(str::trim) {
+        Some(v) if !v.is_empty() => {
+            let dir = wps_sync::validate_dir(v)?;
+            Some(dir.to_string_lossy().to_string())
+        }
+        _ => {
+            settings.wps_sync_workspaces.clear();
+            None
+        }
+    };
     if settings.start_on_login {
         app.autolaunch().enable().map_err(|e| e.to_string())?
     } else {
@@ -1662,6 +1721,80 @@ fn read_file_bytes(state: State<'_, AppState>, relative_path: String) -> Result<
 #[tauri::command]
 fn get_file_hash(state: State<'_, AppState>, relative_path: String) -> Result<String, String> {
     hash(&safe(&state, &relative_path)?)
+}
+#[tauri::command]
+fn validate_wps_dir(path: String) -> Result<String, String> {
+    wps_sync::validate_dir(&path).map(|p| p.to_string_lossy().to_string())
+}
+#[tauri::command]
+fn wps_sync_now(
+    state: State<'_, AppState>,
+    workspace: Option<String>,
+) -> Result<OperationResult, String> {
+    let c = db(&state)?;
+    let settings = load_settings(&c);
+    drop(c);
+    let dir = settings
+        .wps_sync_dir
+        .ok_or("请先在设置中选择 WPS 同步目录")?;
+    let enabled = &settings.wps_sync_workspaces;
+    if enabled.is_empty() {
+        return Err("请先在设置中开启需要同步的工作区".into());
+    }
+    let targets = match workspace {
+        Some(name) => {
+            if !enabled.iter().any(|w| w == &name) {
+                return Err("该工作区未开启云同步".into());
+            }
+            vec![name]
+        }
+        None => enabled.clone(),
+    };
+    let wps = PathBuf::from(&dir);
+    let mut outcome = wps_sync::SyncOutcome::default();
+    for name in &targets {
+        let out = wps_sync::sync_workspace(&state.root, &wps, name)?;
+        outcome.copied.extend(out.copied);
+        outcome.skipped.extend(out.skipped);
+        outcome.failed.extend(out.failed);
+    }
+    let message = if outcome.failed.is_empty() {
+        format!(
+            "已同步 {} 个文件，{} 个内容一致无需更新",
+            outcome.copied.len(),
+            outcome.skipped.len()
+        )
+    } else {
+        format!(
+            "已同步 {} 个文件，{} 个跳过，{} 个失败：{}",
+            outcome.copied.len(),
+            outcome.skipped.len(),
+            outcome.failed.len(),
+            outcome.failed.join("；")
+        )
+    };
+    let c = db(&state)?;
+    log(
+        &c,
+        "wps-sync",
+        &format!(
+            "手动同步（{}）：更新 {}，跳过 {}，失败 {}",
+            if targets.len() == 1 {
+                targets[0].as_str()
+            } else {
+                "全部工作区"
+            },
+            outcome.copied.len(),
+            outcome.skipped.len(),
+            outcome.failed.len()
+        ),
+    );
+    Ok(OperationResult {
+        success: true,
+        message,
+        affected: outcome.copied,
+        skipped: outcome.skipped,
+    })
 }
 
 fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
@@ -1783,7 +1916,9 @@ pub fn run() {
             delete_password_entry,
             reveal_password,
             add_file_tags,
-            remove_file_tags
+            remove_file_tags,
+            validate_wps_dir,
+            wps_sync_now
         ])
         .run(tauri::generate_context!())
         .expect("归档助手启动失败")

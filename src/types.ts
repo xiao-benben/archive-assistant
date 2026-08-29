@@ -85,6 +85,8 @@ export interface AppSettings {
   quietStart: string;
   quietEnd: string;
   mobileEnabled: boolean;
+  wpsSyncDir: string | null;
+  wpsSyncWorkspaces: string[];
 }
 
 export interface BootstrapData {
