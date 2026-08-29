@@ -43,6 +43,7 @@ import {
   LayoutGrid,
   List,
   LoaderCircle,
+  Locate,
   Menu,
   MonitorSmartphone,
   Moon,
@@ -731,9 +732,17 @@ export default function App() {
               load={load}
               select={(file, add) =>
                 setSelected((old) => {
-                  const next = add ? new Set(old) : new Set<string>();
-                  next.has(file) ? next.delete(file) : next.add(file);
-                  return next;
+                  if (add) {
+                    const next = new Set(old);
+                    next.has(file) ? next.delete(file) : next.add(file);
+                    return next;
+                  }
+                  if (old.has(file)) {
+                    const next = new Set(old);
+                    next.delete(file);
+                    return next;
+                  }
+                  return new Set([file]);
                 })
               }
               clearSelection={() => setSelected(new Set())}
@@ -749,6 +758,20 @@ export default function App() {
                 if (item)
                   setDialog({ type: "delete-workspace", workspace: item });
               }}
+              unfavorite={(entry) =>
+                action(async () => {
+                  const links = data.favorites.filter(
+                    (f) => f.relativePath === entry.relativePath,
+                  );
+                  for (const f of links)
+                    await api.toggleFavorite(
+                      f.categoryId,
+                      f.relativePath,
+                      f.displayName,
+                    );
+                  return { message: "已取消收藏" };
+                }, "已取消收藏")
+              }
             />
           )}
           {view === "favorites" && (
@@ -756,6 +779,24 @@ export default function App() {
               data={data}
               open={(f) =>
                 workspace(f.relativePath.split("\\").slice(0, -1).join("\\"))
+              }
+              openFile={(f) => {
+                if (!isTauri())
+                  return tell("请在桌面应用中打开本机文件", true);
+                api
+                  .openFile(f.relativePath)
+                  .catch((error) => tell(message(error), true));
+              }}
+              unfavorite={(f) =>
+                action(
+                  () =>
+                    api.toggleFavorite(
+                      f.categoryId,
+                      f.relativePath,
+                      f.displayName,
+                    ),
+                  "已取消收藏",
+                )
               }
               create={() => setDialog({ type: "favorite" })}
               drop={(categoryId, sourcePaths) =>
@@ -1141,6 +1182,7 @@ function FilesPage({
   dialog,
   refresh,
   removeWorkspace,
+  unfavorite,
 }: {
   path: string;
   files: FileEntry[];
@@ -1160,6 +1202,7 @@ function FilesPage({
   dialog: (d: Dialog) => void;
   refresh: () => void;
   removeWorkspace: (path: string) => void;
+  unfavorite: (entry: FileEntry) => void;
 }) {
   const parts = path.split("\\").filter(Boolean);
   const ocr =
@@ -1425,10 +1468,17 @@ function FilesPage({
                   选择打开方式
                 </button>
               )}
-              <button onClick={() => dialog({ type: "favorite", entry: one })}>
-                <Star />
-                加入收藏
-              </button>
+              {one.favorite ? (
+                <button onClick={() => unfavorite(one)}>
+                  <Star />
+                  取消收藏
+                </button>
+              ) : (
+                <button onClick={() => dialog({ type: "favorite", entry: one })}>
+                  <Star />
+                  加入收藏
+                </button>
+              )}
               {ocr && (
                 <button onClick={() => dialog({ type: "ocr", entry: one })}>
                   <ScanText />
@@ -1446,11 +1496,15 @@ function FilesPage({
 function FavoritesPage({
   data,
   open,
+  openFile,
+  unfavorite,
   create,
   drop,
 }: {
   data: BootstrapData;
   open: (f: BootstrapData["favorites"][number]) => void;
+  openFile: (f: BootstrapData["favorites"][number]) => void;
+  unfavorite: (f: BootstrapData["favorites"][number]) => void;
   create: () => void;
   drop: (categoryId: string, sourcePaths: string[]) => void;
 }) {
@@ -1525,18 +1579,45 @@ function FavoritesPage({
           {items.length ? (
             <div className="favorite-grid">
               {items.map((f) => (
-                <button
-                  className={f.missing ? "missing" : ""}
+                <div
+                  className={`favorite-card ${f.missing ? "missing" : ""}`}
                   key={f.id}
-                  onClick={() => !f.missing && open(f)}
+                  onClick={() => openFile(f)}
+                  title={f.missing ? "原文件位置失效" : "单击打开文件"}
                 >
+                  {!f.missing && (
+                    <span className="favorite-card-actions">
+                      <button
+                        type="button"
+                        aria-label="定位到实际工作区"
+                        title="定位到实际工作区"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          open(f);
+                        }}
+                      >
+                        <Locate />
+                      </button>
+                      <button
+                        type="button"
+                        aria-label="取消收藏"
+                        title="取消收藏"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          unfavorite(f);
+                        }}
+                      >
+                        <X />
+                      </button>
+                    </span>
+                  )}
                   <span className="file-icon">
                     <FileText />
                   </span>
                   <strong>{f.displayName}</strong>
                   <small>{f.missing ? "原文件位置失效" : f.relativePath}</small>
                   <ChevronRight />
-                </button>
+                </div>
               ))}
             </div>
           ) : (
