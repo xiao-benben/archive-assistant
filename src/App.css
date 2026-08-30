@@ -1102,6 +1102,18 @@ select:focus-visible {
   background: #fff7e6;
   white-space: nowrap;
 }
+.file-name .wps-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: #1d6fb8;
+  background: #e8f3fd;
+  white-space: nowrap;
+}
+.file-name .wps-tag svg {
+  width: 9px;
+  height: 9px;
+}
 .details-panel {
   border: 1px solid var(--line);
   border-left: 0;

@@ -25,6 +25,8 @@ import {
   ChevronRight,
   ClipboardList,
   Cloud,
+  CloudOff,
+  CloudUpload,
   Copy,
   Database,
   File,
@@ -879,6 +881,16 @@ export default function App() {
                   .revealInExplorer(entry.relativePath)
                   .catch((error) => tell(message(error), true));
               }}
+              setWpsSync={(entries, enabled) =>
+                action(
+                  () =>
+                    api.setWpsFileSync(
+                      entries.map((entry) => entry.relativePath),
+                      enabled,
+                    ),
+                  enabled ? "已同步到 WPS 目录" : "已取消云同步标记",
+                )
+              }
             />
           )}
           {view === "favorites" && (
@@ -1353,6 +1365,7 @@ function FilesPage({
   addTag,
   removeTag,
   reveal,
+  setWpsSync,
 }: {
   path: string;
   files: FileEntry[];
@@ -1377,6 +1390,7 @@ function FilesPage({
   addTag: (entry: FileEntry, tag: string) => void;
   removeTag: (entry: FileEntry, tag: string) => void;
   reveal: (entry: FileEntry) => void;
+  setWpsSync: (entries: FileEntry[], enabled: boolean) => void;
 }) {
   const parts = path.split("\\").filter(Boolean);
   const ocr =
@@ -1388,6 +1402,9 @@ function FilesPage({
   const paths = [...selected];
   const allSelected = files.length > 0 && selected.size === files.length;
   const partialSelected = selected.size > 0 && !allSelected;
+  const chosenFiles = files.filter((f) => selected.has(f.relativePath));
+  const allWpsSynced =
+    chosenFiles.length > 0 && chosenFiles.every((f) => f.wpsSync);
   return (
     <div className="page workspace-page">
       <div className="workspace-header">
@@ -1489,6 +1506,10 @@ function FilesPage({
               <button onClick={() => dialog({ type: "tag", paths })}>
                 <Tag />
                 标签
+              </button>
+              <button onClick={() => setWpsSync(chosenFiles, !allWpsSynced)}>
+                {allWpsSynced ? <CloudOff /> : <CloudUpload />}
+                {allWpsSynced ? "取消云同步" : "云同步"}
               </button>
               <button
                 className="danger-text"
@@ -1597,6 +1618,12 @@ function FilesPage({
                       <em className="favorite-tag">
                         <Heart />
                         已收藏
+                      </em>
+                    )}
+                    {file.wpsSync && (
+                      <em className="wps-tag">
+                        <Cloud />
+                        云同步
                       </em>
                     )}
                     {file.tags.map((t) => (
@@ -1715,6 +1742,17 @@ function FilesPage({
                 <button onClick={() => dialog({ type: "favorite", entry: one })}>
                   <Star />
                   加入收藏
+                </button>
+              )}
+              {one.wpsSync ? (
+                <button onClick={() => setWpsSync([one], false)}>
+                  <CloudOff />
+                  取消 WPS 同步
+                </button>
+              ) : (
+                <button onClick={() => setWpsSync([one], true)}>
+                  <CloudUpload />
+                  同步到 WPS
                 </button>
               )}
               {ocr && (
@@ -2921,7 +2959,7 @@ function SettingsPage({
           )}
           <div className="privacy-note">
             <ShieldCheck />
-            需要 WPS 客户端保持登录并开启云同步。首版只同步新增和更新的文件，删除与重命名不会反映到云端。
+            需要 WPS 客户端保持登录并开启云同步。同步范围 = 开启的工作区全部文件 ∪ 单独标记的文件；只同步新增和更新的文件，删除与重命名不会反映到云端，取消文件标记也不会删除已复制到 WPS 目录的文件。
           </div>
         </section>
         <section className="settings-section">

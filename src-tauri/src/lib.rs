@@ -58,6 +58,7 @@ struct FileEntry {
     favorite: bool,
     ocr_indexed: bool,
     tags: Vec<String>,
+    wps_sync: bool,
 }
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -222,7 +223,8 @@ fn init_db(c: &Connection) -> rusqlite::Result<()> {
  CREATE TABLE IF NOT EXISTS remote_devices(id TEXT PRIMARY KEY,name TEXT NOT NULL,token_hash TEXT NOT NULL,permissions TEXT NOT NULL,revoked INTEGER DEFAULT 0,last_seen INTEGER);
  CREATE TABLE IF NOT EXISTS ai_jobs(id TEXT PRIMARY KEY,provider TEXT NOT NULL,task_type TEXT NOT NULL,relative_path TEXT,state TEXT NOT NULL,result TEXT,created_at INTEGER NOT NULL);
  CREATE TABLE IF NOT EXISTS password_entries(id TEXT PRIMARY KEY,title TEXT NOT NULL,url TEXT NOT NULL DEFAULT '',username TEXT NOT NULL DEFAULT '',password_enc TEXT NOT NULL DEFAULT '',notes TEXT NOT NULL DEFAULT '',group_tag TEXT NOT NULL DEFAULT '',created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL);
- CREATE TABLE IF NOT EXISTS file_tags(relative_path TEXT NOT NULL,tag TEXT NOT NULL,UNIQUE(relative_path,tag));"#)?;
+ CREATE TABLE IF NOT EXISTS file_tags(relative_path TEXT NOT NULL,tag TEXT NOT NULL,UNIQUE(relative_path,tag));
+ CREATE TABLE IF NOT EXISTS wps_sync_files(relative_path TEXT PRIMARY KEY,created_at INTEGER NOT NULL);"#)?;
     let has_plan_scope = c
         .prepare("PRAGMA table_info(tasks)")?
         .query_map([], |row| row.get::<_, String>(1))?
@@ -499,6 +501,17 @@ fn is_indexed(c: &Connection, p: &str) -> bool {
     .flatten()
     .is_some()
 }
+fn is_wps_synced(c: &Connection, p: &str) -> bool {
+    c.query_row(
+        "SELECT 1 FROM wps_sync_files WHERE relative_path=?1 LIMIT 1",
+        [p],
+        |_| Ok(()),
+    )
+    .optional()
+    .ok()
+    .flatten()
+    .is_some()
+}
 fn entry(s: &AppState, c: &Connection, p: &Path, tags: &[String]) -> Result<FileEntry, String> {
     let m = p.metadata().map_err(|e| e.to_string())?;
     let r = relative(&s.root, p);
@@ -521,6 +534,7 @@ fn entry(s: &AppState, c: &Connection, p: &Path, tags: &[String]) -> Result<File
         favorite: is_favorite(c, &r),
         ocr_indexed: is_indexed(c, &r),
         tags: tags.to_vec(),
+        wps_sync: is_wps_synced(c, &r),
     })
 }
 fn tag_map(c: &Connection) -> HashMap<String, Vec<String>> {
@@ -980,6 +994,10 @@ fn rename_entry(
         "UPDATE file_tags SET relative_path=?1 WHERE relative_path=?2",
         params![new, old],
     );
+    let _ = c.execute(
+        "UPDATE wps_sync_files SET relative_path=?1 WHERE relative_path=?2",
+        params![new, old],
+    );
     log(&c, "rename", &format!("{old}->{new}"));
     Ok(OperationResult {
         success: true,
@@ -1037,6 +1055,10 @@ fn transfer_many(
             "UPDATE file_tags SET relative_path = CASE WHEN relative_path=?1 THEN ?2 ELSE ?2 || substr(relative_path, ?3) END WHERE relative_path=?1 OR substr(relative_path, 1, ?3)=?1 || '\\'",
             params![old, new, old_chars],
         );
+        let _ = c.execute(
+            "UPDATE wps_sync_files SET relative_path = CASE WHEN relative_path=?1 THEN ?2 ELSE ?2 || substr(relative_path, ?3) END WHERE relative_path=?1 OR substr(relative_path, 1, ?3)=?1 || '\\'",
+            params![old, new, old_chars],
+        );
     }
     log(&c, &mode, &format!("{} item(s)->{target}", affected.len()));
     sync_affected_to_wps(s, &c, &affected);
@@ -1065,9 +1087,6 @@ fn sync_affected_to_wps(s: &AppState, c: &Connection, affected: &[String]) {
     let Some(dir) = settings.wps_sync_dir.clone() else {
         return;
     };
-    if settings.wps_sync_workspaces.is_empty() {
-        return;
-    }
     let wps = PathBuf::from(&dir);
     let mut synced = 0usize;
     for path in affected {
@@ -1075,11 +1094,12 @@ fn sync_affected_to_wps(s: &AppState, c: &Connection, affected: &[String]) {
             continue;
         };
         let workspace = workspace.as_os_str().to_string_lossy().to_string();
-        if !settings
+        // 并集规则：工作区开启，或文件被单独标记，都会同步。
+        let workspace_on = settings
             .wps_sync_workspaces
             .iter()
-            .any(|w| w == &workspace)
-        {
+            .any(|w| w == &workspace);
+        if !workspace_on && !is_wps_synced(c, path) {
             continue;
         }
         match wps_sync::sync_file(&s.root, &wps, path) {
@@ -1145,6 +1165,10 @@ fn delete_entries(
     for r in &affected {
         let _ = c.execute(
             "DELETE FROM file_tags WHERE relative_path=?1 OR substr(relative_path,1,?2)=?1 || '\\'",
+            params![r, r.chars().count() as i64 + 1],
+        );
+        let _ = c.execute(
+            "DELETE FROM wps_sync_files WHERE relative_path=?1 OR substr(relative_path,1,?2)=?1 || '\\'",
             params![r, r.chars().count() as i64 + 1],
         );
     }
@@ -1747,30 +1771,70 @@ fn wps_sync_now(
 ) -> Result<OperationResult, String> {
     let c = db(&state)?;
     let settings = load_settings(&c);
+    let marked: Vec<String> = {
+        let mut stmt = c
+            .prepare("SELECT relative_path FROM wps_sync_files ORDER BY relative_path")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| e.to_string())?;
+        rows.filter_map(Result::ok).collect()
+    };
     drop(c);
     let dir = settings
         .wps_sync_dir
         .ok_or("请先在设置中选择 WPS 同步目录")?;
     let enabled = &settings.wps_sync_workspaces;
-    if enabled.is_empty() {
-        return Err("请先在设置中开启需要同步的工作区".into());
-    }
-    let targets = match workspace {
-        Some(name) => {
-            if !enabled.iter().any(|w| w == &name) {
-                return Err("该工作区未开启云同步".into());
-            }
-            vec![name]
-        }
-        None => enabled.clone(),
-    };
-    let wps = PathBuf::from(&dir);
     let mut outcome = wps_sync::SyncOutcome::default();
-    for name in &targets {
-        let out = wps_sync::sync_workspace(&state.root, &wps, name)?;
-        outcome.copied.extend(out.copied);
-        outcome.skipped.extend(out.skipped);
-        outcome.failed.extend(out.failed);
+    let scope;
+    let wps = PathBuf::from(&dir);
+    match workspace {
+        Some(name) => {
+            scope = name.clone();
+            let workspace_on = enabled.iter().any(|w| w == &name);
+            if workspace_on {
+                let out = wps_sync::sync_workspace(&state.root, &wps, &name)?;
+                outcome.copied.extend(out.copied);
+                outcome.skipped.extend(out.skipped);
+                outcome.failed.extend(out.failed);
+            }
+            for rel in &marked {
+                if rel.starts_with(&format!("{name}\\")) {
+                    continue;
+                }
+                match wps_sync::sync_file(&state.root, &wps, rel) {
+                    Ok(true) => outcome.copied.push(rel.clone()),
+                    Ok(false) => outcome.skipped.push(rel.clone()),
+                    Err(e) => outcome.failed.push(format!("{rel}：{e}")),
+                }
+            }
+            if !workspace_on && outcome.copied.is_empty() && outcome.skipped.is_empty() {
+                return Err("该工作区未开启云同步，且没有单独标记的文件".into());
+            }
+        }
+        None => {
+            if enabled.is_empty() && marked.is_empty() {
+                return Err("请先开启工作区同步，或在文件上标记云同步".into());
+            }
+            scope = "全部".into();
+            for name in enabled {
+                let out = wps_sync::sync_workspace(&state.root, &wps, name)?;
+                outcome.copied.extend(out.copied);
+                outcome.skipped.extend(out.skipped);
+                outcome.failed.extend(out.failed);
+            }
+            for rel in &marked {
+                let workspace = rel.split('\\').next().unwrap_or("");
+                if enabled.iter().any(|w| w == workspace) {
+                    continue;
+                }
+                match wps_sync::sync_file(&state.root, &wps, rel) {
+                    Ok(true) => outcome.copied.push(rel.clone()),
+                    Ok(false) => outcome.skipped.push(rel.clone()),
+                    Err(e) => outcome.failed.push(format!("{rel}：{e}")),
+                }
+            }
+        }
     }
     let message = if outcome.failed.is_empty() {
         format!(
@@ -1792,12 +1856,7 @@ fn wps_sync_now(
         &c,
         "wps-sync",
         &format!(
-            "手动同步（{}）：更新 {}，跳过 {}，失败 {}",
-            if targets.len() == 1 {
-                targets[0].as_str()
-            } else {
-                "全部工作区"
-            },
+            "手动同步（{scope}）：更新 {}，跳过 {}，失败 {}",
             outcome.copied.len(),
             outcome.skipped.len(),
             outcome.failed.len()
@@ -1809,6 +1868,91 @@ fn wps_sync_now(
         affected: outcome.copied,
         skipped: outcome.skipped,
     })
+}
+
+#[tauri::command]
+fn set_wps_file_sync(
+    state: State<'_, AppState>,
+    relative_paths: Vec<String>,
+    enabled: bool,
+) -> Result<OperationResult, String> {
+    let c = db(&state)?;
+    let settings = load_settings(&c);
+    drop(c);
+    if enabled {
+        let dir = settings
+            .wps_sync_dir
+            .ok_or("请先在设置中选择 WPS 同步目录")?;
+        let wps = PathBuf::from(&dir);
+        let mut affected = vec![];
+        let mut failed = vec![];
+        for p in &relative_paths {
+            let path = safe(&state, p)?;
+            if !path.is_file() {
+                failed.push(p.clone());
+                continue;
+            }
+            let r = relative(&state.root, &path);
+            {
+                let c = db(&state)?;
+                c.execute(
+                    "INSERT OR IGNORE INTO wps_sync_files VALUES(?1,?2)",
+                    params![r, ms(SystemTime::now())],
+                )
+                .map_err(|e| e.to_string())?;
+            }
+            match wps_sync::sync_file(&state.root, &wps, &r) {
+                Ok(_) => affected.push(r),
+                Err(e) => failed.push(format!("{r}：{e}")),
+            }
+        }
+        let c = db(&state)?;
+        log(
+            &c,
+            "wps-file-sync-on",
+            &format!("{} item(s)", affected.len()),
+        );
+        let message = if failed.is_empty() {
+            format!("已把 {} 个文件同步到 WPS 目录", affected.len())
+        } else {
+            format!(
+                "已同步 {} 个文件，{} 个失败：{}",
+                affected.len(),
+                failed.len(),
+                failed.join("；")
+            )
+        };
+        Ok(OperationResult {
+            success: true,
+            message,
+            affected,
+            skipped: failed,
+        })
+    } else {
+        let c = db(&state)?;
+        let mut affected = vec![];
+        for p in &relative_paths {
+            let path = safe(&state, p)?;
+            let r = relative(&state.root, &path);
+            c.execute("DELETE FROM wps_sync_files WHERE relative_path=?1", [&r])
+                .map_err(|e| e.to_string())?;
+            affected.push(r);
+        }
+        log(
+            &c,
+            "wps-file-sync-off",
+            &format!("{} item(s)", affected.len()),
+        );
+        Ok(OperationResult {
+            success: true,
+            message: format!(
+                "已取消 {} 个文件的云同步标记（已复制到 WPS 目录的文件会保留）",
+                affected.len()
+            ),
+            affected,
+            skipped: vec![],
+        })
+    }
 }
 
 fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
@@ -1927,6 +2071,7 @@ pub fn run() {
             open_file,
             open_file_with,
             reveal_in_explorer,
+            set_wps_file_sync,
             save_password_entry,
             delete_password_entry,
             reveal_password,

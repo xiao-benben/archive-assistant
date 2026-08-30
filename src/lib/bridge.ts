@@ -301,4 +301,15 @@ export const api = {
       affected: [],
       skipped: [],
     })),
+  setWpsFileSync: (relativePaths: string[], enabled: boolean) =>
+    call<OperationResult>(
+      "set_wps_file_sync",
+      { relativePaths, enabled },
+      () => ({
+        success: true,
+        message: "浏览器预览不支持云盘同步",
+        affected: [],
+        skipped: [],
+      }),
+    ),
 };

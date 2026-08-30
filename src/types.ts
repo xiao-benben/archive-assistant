@@ -27,6 +27,7 @@ export interface FileEntry {
   favorite: boolean;
   ocrIndexed: boolean;
   tags: string[];
+  wpsSync: boolean;
 }
 
 export interface FavoriteCategory {
