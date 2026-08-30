@@ -1679,6 +1679,7 @@ fn save_settings(
     settings.wps_sync_dir = match settings.wps_sync_dir.as_deref().map(str::trim) {
         Some(v) if !v.is_empty() => {
             let dir = wps_sync::validate_dir(v)?;
+            ensure_wps_dir_usable(&state.root, &dir)?;
             Some(dir.to_string_lossy().to_string())
         }
         _ => {
@@ -1760,9 +1761,30 @@ fn read_file_bytes(state: State<'_, AppState>, relative_path: String) -> Result<
 fn get_file_hash(state: State<'_, AppState>, relative_path: String) -> Result<String, String> {
     hash(&safe(&state, &relative_path)?)
 }
+fn ensure_wps_dir_usable(root: &Path, dir: &Path) -> Result<(), String> {
+    let root = simplify(
+        root.canonicalize()
+            .map_err(|e| format!("无法访问归档存储目录：{e}"))?,
+    );
+    if dir == root {
+        return Err("同步目录不能是归档存储目录本身，请选择 WPS 客户端的本地同步文件夹".into());
+    }
+    if dir.starts_with(&root) {
+        return Err("同步目录不能位于归档存储目录内".into());
+    }
+    if root.starts_with(dir) {
+        return Err("同步目录不能包含归档存储目录".into());
+    }
+    Ok(())
+}
 #[tauri::command]
-fn validate_wps_dir(path: String) -> Result<String, String> {
-    wps_sync::validate_dir(&path).map(|p| p.to_string_lossy().to_string())
+fn validate_wps_dir(
+    state: State<AppState>,
+    path: String,
+) -> Result<String, String> {
+    let dir = wps_sync::validate_dir(&path)?;
+    ensure_wps_dir_usable(&state.root, &dir)?;
+    Ok(dir.to_string_lossy().to_string())
 }
 #[tauri::command]
 fn wps_sync_now(
