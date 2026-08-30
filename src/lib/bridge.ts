@@ -37,6 +37,7 @@ const demoBootstrap = (): BootstrapData => ({
     modelBaseUrl: "https://api.deepseek.com",
     modelName: "deepseek-chat",
     modelKeySaved: false,
+    vaultPassSaved: false,
     quietHours: false,
     quietStart: "22:00",
     quietEnd: "07:30",
@@ -210,12 +211,25 @@ export const api = {
       browserState.tasks = browserState.tasks.filter((task) => task.id !== id);
       persistBrowserState();
     }),
-  saveSettings: (settings: AppSettings, modelApiKey?: string) =>
-    call<AppSettings>("save_settings", { settings, modelApiKey }, () => {
-      browserState.settings = settings;
-      persistBrowserState();
-      return settings;
-    }),
+  saveSettings: (
+    settings: AppSettings,
+    modelApiKey?: string,
+    vaultPassword?: string,
+  ) =>
+    call<AppSettings>(
+      "save_settings",
+      { settings, modelApiKey, vaultPassword },
+      () => {
+        browserState.settings = settings;
+        persistBrowserState();
+        return settings;
+      },
+    ),
+  verifyVaultPassword: (password: string) =>
+    call<void>("verify_vault_password", { password }, () => {}),
+  aiAsk: (relativePath: string, question: string) =>
+    call<string>("ai_ask", { relativePath, question }),
+  aiTestConnection: () => call<string>("ai_test_connection", undefined),
   saveOcrResult: (result: OcrResult) =>
     call<void>("save_ocr_result", { result }),
   getCachedOcr: (relativePath: string) =>

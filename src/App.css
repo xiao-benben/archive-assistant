@@ -3129,3 +3129,163 @@ select:focus-visible {
   border-color: var(--blue);
   color: var(--blue);
 }
+
+/* ---- v0.2.6: vault verify, task dialog redesign, AI assistant ---- */
+.verify-error {
+  color: var(--red);
+  font-size: 11px;
+  margin: 6px 0 0;
+}
+.chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  align-items: center;
+}
+.chip-row .field,
+.chip-row label {
+  display: contents;
+}
+.chip {
+  height: 28px;
+  border: 1px solid var(--line);
+  background: var(--paper);
+  color: var(--ink);
+  font-size: 11px;
+  border-radius: 8px;
+  padding: 0 10px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.chip:hover {
+  border-color: var(--blue);
+  color: var(--blue);
+}
+.chip.active {
+  background: var(--blue-soft);
+  border-color: var(--blue);
+  color: var(--blue);
+  font-weight: 600;
+}
+.chip.flag.p-low.active {
+  background: #e8f3fd;
+  border-color: #1d6fb8;
+  color: #1d6fb8;
+}
+.chip.flag.p-medium.active {
+  background: #fff4e5;
+  border-color: #c07a1d;
+  color: #c07a1d;
+}
+.chip.flag.p-high.active {
+  background: #fdecec;
+  border-color: #c6463d;
+  color: #c6463d;
+}
+.chip-date,
+.chip-time {
+  height: 28px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--paper);
+  color: var(--ink);
+  font-size: 11px;
+  padding: 0 6px;
+}
+.ai-running {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 11px;
+  margin-top: 12px;
+}
+.ai-answer {
+  margin-top: 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--soft);
+  overflow: hidden;
+}
+.ai-answer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  font-size: 11px;
+  color: var(--muted);
+}
+.ai-answer-head button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 0;
+  background: transparent;
+  color: var(--blue);
+  font-size: 11px;
+  cursor: pointer;
+  padding: 0;
+}
+.ai-answer-head button svg {
+  width: 12px;
+  height: 12px;
+}
+.ai-answer pre {
+  margin: 0;
+  padding: 12px;
+  max-height: 320px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--ink);
+  font-family: inherit;
+}
+.ai-test-result {
+  flex: 1;
+  margin: 0;
+  font-size: 11px;
+  align-self: center;
+}
+.ai-test-result.ok {
+  color: var(--green);
+}
+.ai-test-result.error {
+  color: var(--red);
+}
+.ai-hero {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 20px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: linear-gradient(135deg, var(--blue-soft), var(--paper));
+  padding: 22px 24px;
+  margin-bottom: 22px;
+  min-height: 128px;
+}
+.ai-hero-off {
+  background: var(--soft);
+  cursor: pointer;
+}
+.ai-hero-off:hover {
+  border-color: var(--blue);
+}
+.ai-hero .ocr-copy {
+  max-width: 640px;
+}
+.ai-hero h2 {
+  font-size: 17px;
+  margin: 6px 0;
+}
+.ai-hero p {
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.7;
+  margin: 0;
+}

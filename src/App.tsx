@@ -11,11 +11,6 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
-  isPermissionGranted,
-  requestPermission,
-  sendNotification,
-} from "@tauri-apps/plugin-notification";
-import {
   Archive,
   Bell,
   Bot,
@@ -40,6 +35,7 @@ import {
   ExternalLink,
   Eye,
   EyeOff,
+  Flag,
   Folder,
   FolderOpen,
   FolderPlus,
@@ -160,6 +156,8 @@ type Dialog =
   | { type: "password"; entry?: PasswordEntry }
   | { type: "password-delete"; entry: PasswordEntry }
   | { type: "tag"; paths: string[] }
+  | { type: "vault-verify" }
+  | { type: "ai"; entry: FileEntry }
   | null;
 
 function Modal({
@@ -355,41 +353,6 @@ export default function App() {
     addEventListener("keydown", keys);
     return () => removeEventListener("keydown", keys);
   }, [dialog, selected.size]);
-  useEffect(() => {
-    if (!data?.settings.notifications || !isTauri()) return;
-    const run = async () => {
-      const now = new Date();
-      const time = now.toTimeString().slice(0, 5);
-      const quiet =
-        data.settings.quietHours &&
-        (data.settings.quietStart <= data.settings.quietEnd
-          ? time >= data.settings.quietStart && time < data.settings.quietEnd
-          : time >= data.settings.quietStart || time < data.settings.quietEnd);
-      if (quiet) return;
-      for (const task of data.tasks.filter(
-        (t) =>
-          !t.completed &&
-          t.dueDate === today() &&
-          t.remindAt &&
-          t.remindAt <= time,
-      )) {
-        const key = `archive-reminder-${task.id}-${task.dueDate}-${task.remindAt}`;
-        if (localStorage.getItem(key)) continue;
-        let granted = await isPermissionGranted();
-        if (!granted) granted = (await requestPermission()) === "granted";
-        if (granted) {
-          sendNotification({
-            title: "归档助手 · 今日计划",
-            body: `${task.remindAt} · ${task.title}`,
-          });
-          localStorage.setItem(key, "1");
-        }
-      }
-    };
-    void run();
-    const id = setInterval(run, 30_000);
-    return () => clearInterval(id);
-  }, [data?.settings, data?.tasks]);
   useEffect(() => {
     const enabled = data?.settings.ocrAutoWorkspaces ?? [];
     if (!isTauri() || !enabled.length || autoOcrRunning.current) return;
@@ -644,6 +607,11 @@ export default function App() {
               className={view === n.id ? "active" : ""}
               key={n.id}
               onClick={() => {
+                if (n.id === "passwords" && data.settings.vaultPassSaved) {
+                  setDialog({ type: "vault-verify" });
+                  setSidebar(false);
+                  return;
+                }
                 setView(n.id);
                 setSidebar(false);
               }}
@@ -962,8 +930,11 @@ export default function App() {
             <SettingsPage
               value={data.settings}
               data={data}
-              save={(value, key) =>
-                action(() => api.saveSettings(value, key), "设置已安全保存")
+              save={(value, key, vaultPass) =>
+                action(
+                  () => api.saveSettings(value, key, vaultPass),
+                  "设置已安全保存",
+                )
               }
               notify={tell}
             />
@@ -1102,6 +1073,19 @@ export default function App() {
             </button>
           </div>
         </Modal>
+      )}
+      {dialog?.type === "vault-verify" && (
+        <VaultVerifyDialog
+          close={() => setDialog(null)}
+          success={() => {
+            setDialog(null);
+            setView("passwords");
+            tell("密码本已解锁");
+          }}
+        />
+      )}
+      {dialog?.type === "ai" && (
+        <AiDialog entry={dialog.entry} close={() => setDialog(null)} />
       )}
       {dialog?.type === "tag" && (
         <TagDialog
@@ -1714,8 +1698,14 @@ function FilesPage({
                 <dd>{dateTime(one.modifiedAt)}</dd>
               </div>
               <div>
-                <dt>文字索引</dt>
-                <dd>{one.ocrIndexed ? "已建立" : "未建立"}</dd>
+                <dt>OCR 文字索引</dt>
+                <dd
+                  title="OCR 识别出的文字会存入本地索引，让左上角的全局搜索可以按文件内容找到扫描件，不会改动原文件"
+                >
+                  {one.ocrIndexed
+                    ? "已建立 · 可被全局搜索"
+                    : "未建立 · 图片/PDF 可用离线 OCR 建立"}
+                </dd>
               </div>
             </dl>
             <div className="detail-actions">
@@ -1759,6 +1749,12 @@ function FilesPage({
                 <button onClick={() => dialog({ type: "ocr", entry: one })}>
                   <ScanText />
                   离线 OCR
+                </button>
+              )}
+              {!one.isDirectory && (
+                <button onClick={() => dialog({ type: "ai", entry: one })}>
+                  <Sparkles />
+                  AI 助手
                 </button>
               )}
             </div>
@@ -2707,6 +2703,45 @@ function SmartPage({
           <small>LOCAL · PRIVATE</small>
         </div>
       </section>
+      {(() => {
+        const modelReady =
+          data.settings.modelKeySaved &&
+          data.connectors.some((c) => c.id === "model" && c.state === "ready");
+        return (
+          <section
+            className={`ai-hero ${modelReady ? "" : "ai-hero-off"}`}
+            onClick={!modelReady ? settings : undefined}
+          >
+            <div className="ocr-copy">
+              <span className="smart-label">
+                <Sparkles />
+                AI ASSISTANT
+              </span>
+              <h2>问一问你的文件</h2>
+              {modelReady ? (
+                <p>
+                  在工作区选中文件，右侧详情面板点「AI
+                  助手」，即可针对文件内容提问：总结要点、检查错别字和标点、解读内容。文件内容仅发送给你自己配置的模型服务。
+                </p>
+              ) : (
+                <p>
+                  在设置中配置大模型 API
+                  密钥后，可以针对文件内容自由提问：总结要点、检查错别字和标点、解读内容。点击此处前往设置。
+                </p>
+              )}
+            </div>
+            <div className="scan-visual">
+              <div className="paper-lines">
+                <span />
+                <span />
+                <span />
+              </div>
+              <i />
+              <small>{modelReady ? "READY" : "NOT CONFIGURED"}</small>
+            </div>
+          </section>
+        );
+      })()}
       <div className="connector-heading">
         <div>
           <h2>能力连接器</h2>
@@ -2721,9 +2756,19 @@ function SmartPage({
         {data.connectors.map((c) => (
           <article
             key={c.id}
-            className={c.id === "wps" ? "clickable" : ""}
-            onClick={c.id === "wps" ? settings : undefined}
-            title={c.id === "wps" ? "前往设置开启 WPS 云盘同步" : undefined}
+            className={
+              c.id === "wps" || c.id === "model" ? "clickable" : ""
+            }
+            onClick={
+              c.id === "wps" || c.id === "model" ? settings : undefined
+            }
+            title={
+              c.id === "wps"
+                ? "前往设置开启 WPS 云盘同步"
+                : c.id === "model"
+                  ? "前往设置配置大模型 API"
+                  : undefined
+            }
           >
             <span className={`connector-icon ${c.id}`}>
               {c.id === "model" ? (
@@ -2761,12 +2806,27 @@ function SettingsPage({
 }: {
   value: AppSettings;
   data: BootstrapData;
-  save: (v: AppSettings, key?: string) => void;
+  save: (v: AppSettings, key?: string, vaultPass?: string) => void;
   notify: (text: string, error?: boolean) => void;
 }) {
   const [draft, setDraft] = useState(value);
   const [key, setKey] = useState("");
+  const [vaultPass, setVaultPass] = useState("");
   const [syncing, setSyncing] = useState(false);
+  const [aiTest, setAiTest] = useState<{
+    state: "idle" | "running" | "ok" | "error";
+    message: string;
+  }>({ state: "idle", message: "" });
+  const testModel = async () => {
+    if (aiTest.state === "running") return;
+    setAiTest({ state: "running", message: "" });
+    try {
+      const reply = await api.aiTestConnection();
+      setAiTest({ state: "ok", message: reply });
+    } catch (e) {
+      setAiTest({ state: "error", message: message(e) });
+    }
+  };
   const pickWpsDir = async () => {
     try {
       const picked = await open({ directory: true, multiple: false });
@@ -2801,7 +2861,7 @@ function SettingsPage({
         action={
           <button
             className="button primary"
-            onClick={() => save(draft, key || undefined)}
+            onClick={() => save(draft, key || undefined, vaultPass || undefined)}
           >
             保存设置
           </button>
@@ -3008,9 +3068,57 @@ function SettingsPage({
               }
             />
           </label>
+          <div className="field-row">
+            <button
+              className="button light"
+              disabled={aiTest.state === "running"}
+              onClick={() => void testModel()}
+            >
+              <RefreshCw />
+              {aiTest.state === "running" ? "连接中…" : "测试连接"}
+            </button>
+            {aiTest.state === "ok" && (
+              <p className="ai-test-result ok">{aiTest.message}</p>
+            )}
+            {aiTest.state === "error" && (
+              <p className="ai-test-result error">{aiTest.message}</p>
+            )}
+          </div>
           <div className="privacy-note">
             <ShieldCheck />
             发送文件内容前必须由你主动确认，模型不能自行操作文件。
+          </div>
+        </section>
+        <section className="settings-section">
+          <div className="settings-title">
+            <KeyRound />
+            <div>
+              <h2>密码本</h2>
+              <p>进入密码本模块时验证访问密码。</p>
+            </div>
+            <span
+              className={`status-dot ${draft.vaultPassSaved ? "ready" : ""}`}
+            >
+              {draft.vaultPassSaved ? "已开启" : "未开启"}
+            </span>
+          </div>
+          <label className="field">
+            <span>访问密码</span>
+            <input
+              type="password"
+              value={vaultPass}
+              onChange={(e) => setVaultPass(e.target.value)}
+              placeholder={
+                draft.vaultPassSaved
+                  ? "已开启验证 · 输入新密码可修改"
+                  : "设置后，每次进入密码本都需要输入"
+              }
+            />
+          </label>
+          <div className="privacy-note">
+            <ShieldCheck />
+            访问密码保存在 Windows 凭据管理器。忘记密码时，可在「Windows 凭据管理器
+            → 普通凭据」删除「BEN Archive Assistant / vault-pass」条目后重启应用重置。
           </div>
         </section>
         <section className="settings-section">
@@ -3358,6 +3466,155 @@ function FavoriteDialog({
     </Modal>
   );
 }
+function VaultVerifyDialog({
+  close,
+  success,
+}: {
+  close: () => void;
+  success: () => void;
+}) {
+  const [value, setValue] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const submit = async () => {
+    if (!value.trim() || busy) return;
+    setBusy(true);
+    setError("");
+    try {
+      await api.verifyVaultPassword(value);
+      success();
+    } catch (e) {
+      setError(message(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Modal
+      title="密码本已锁定"
+      text="输入访问密码，查看保存的账号密码。"
+      close={close}
+    >
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          void submit();
+        }}
+      >
+        <label className="field">
+          <span>访问密码</span>
+          <input
+            autoFocus
+            type="password"
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+          />
+        </label>
+        {error && <p className="verify-error">{error}</p>}
+        <div className="modal-actions">
+          <button type="button" className="button secondary" onClick={close}>
+            取消
+          </button>
+          <button
+            className="button primary"
+            disabled={busy || !value.trim()}
+          >
+            {busy ? "验证中…" : "解锁"}
+          </button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+function AiDialog({
+  entry,
+  close,
+}: {
+  entry: FileEntry;
+  close: () => void;
+}) {
+  const [question, setQuestion] = useState("");
+  const [answer, setAnswer] = useState("");
+  const [error, setError] = useState("");
+  const [running, setRunning] = useState(false);
+  const ask = async () => {
+    const q = question.trim();
+    if (!q || running) return;
+    setRunning(true);
+    setError("");
+    setAnswer("");
+    try {
+      setAnswer(await api.aiAsk(entry.relativePath, q));
+    } catch (e) {
+      setError(message(e));
+    } finally {
+      setRunning(false);
+    }
+  };
+  return (
+    <Modal
+      title="AI 助手"
+      text={`基于「${entry.name}」的内容回答问题，需要先在设置中配置大模型 API。`}
+      close={close}
+      wide
+    >
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          void ask();
+        }}
+      >
+        <label className="field">
+          <span>你的问题</span>
+          <textarea
+            autoFocus
+            rows={2}
+            value={question}
+            placeholder='试试问："总结这份文件的要点"、"检查错别字和标点"、"这份文件讲了什么？"'
+            onChange={(e) => setQuestion(e.target.value)}
+          />
+        </label>
+        <div className="modal-actions">
+          <button type="button" className="button secondary" onClick={close}>
+            关闭
+          </button>
+          <button
+            className="button primary"
+            disabled={running || !question.trim()}
+          >
+            {running ? "思考中…" : "提问"}
+          </button>
+        </div>
+      </form>
+      {running && (
+        <div className="ai-running">
+          <LoaderCircle className="spin" />
+          正在读取文件内容并请求大模型…
+        </div>
+      )}
+      {error && <p className="verify-error">{error}</p>}
+      {answer && (
+        <div className="ai-answer">
+          <div className="ai-answer-head">
+            <span>回答</span>
+            <button
+              type="button"
+              onClick={() => {
+                void navigator.clipboard.writeText(answer);
+              }}
+            >
+              <Copy />
+              复制
+            </button>
+          </div>
+          <pre>{answer}</pre>
+        </div>
+      )}
+    </Modal>
+  );
+}
+
 function TaskDialog({
   task,
   defaults,
@@ -3433,46 +3690,122 @@ function TaskDialog({
         <div className="field-row">
           <label className="field">
             <span>日期</span>
-            <input
-              type="date"
-              value={form.dueDate}
-              onChange={(e) => setForm({ ...form, dueDate: e.target.value })}
-            />
-          </label>
-          <label className="field">
-            <span>提醒时间</span>
-            <input
-              type="time"
-              value={form.remindAt}
-              onChange={(e) => setForm({ ...form, remindAt: e.target.value })}
-            />
+            <div className="chip-row">
+              {[
+                { label: "今天", value: dayKey() },
+                {
+                  label: "明天",
+                  value: (() => {
+                    const d = new Date();
+                    d.setDate(d.getDate() + 1);
+                    return dayKey(d);
+                  })(),
+                },
+                {
+                  label: "后天",
+                  value: (() => {
+                    const d = new Date();
+                    d.setDate(d.getDate() + 2);
+                    return dayKey(d);
+                  })(),
+                },
+                {
+                  label: "下周一",
+                  value: (() => {
+                    const d = new Date();
+                    d.setDate(d.getDate() + (((8 - d.getDay()) % 7) || 7));
+                    return dayKey(d);
+                  })(),
+                },
+              ].map((c) => (
+                <button
+                  type="button"
+                  key={c.label}
+                  className={`chip ${form.dueDate === c.value ? "active" : ""}`}
+                  onClick={() => setForm({ ...form, dueDate: c.value })}
+                >
+                  {c.label}
+                </button>
+              ))}
+              <input
+                type="date"
+                className="chip-date"
+                value={form.dueDate}
+                onChange={(e) => setForm({ ...form, dueDate: e.target.value })}
+              />
+            </div>
           </label>
         </div>
         <div className="field-row">
           <label className="field">
             <span>优先级</span>
-            <select
-              value={form.priority}
-              onChange={(e) =>
-                setForm({ ...form, priority: e.target.value as TaskPriority })
-              }
-            >
-              <option value="low">低</option>
-              <option value="medium">中</option>
-              <option value="high">高</option>
-            </select>
+            <div className="chip-row">
+              {(
+                [
+                  { value: "low", label: "低", tone: "p-low" },
+                  { value: "medium", label: "中", tone: "p-medium" },
+                  { value: "high", label: "高", tone: "p-high" },
+                ] as const
+              ).map((p) => (
+                <button
+                  type="button"
+                  key={p.value}
+                  className={`chip flag ${p.tone} ${form.priority === p.value ? "active" : ""}`}
+                  onClick={() =>
+                    setForm({ ...form, priority: p.value as TaskPriority })
+                  }
+                >
+                  <Flag size={11} />
+                  {p.label}
+                </button>
+              ))}
+            </div>
+          </label>
+        </div>
+        <div className="field-row">
+          <label className="field">
+            <span>提醒时间</span>
+            <div className="chip-row">
+              <input
+                type="time"
+                className="chip-time"
+                value={form.remindAt}
+                onChange={(e) =>
+                  setForm({ ...form, remindAt: e.target.value })
+                }
+              />
+              {form.remindAt && (
+                <button
+                  type="button"
+                  className="chip"
+                  onClick={() => setForm({ ...form, remindAt: "" })}
+                >
+                  不提醒
+                </button>
+              )}
+            </div>
           </label>
           <label className="field">
             <span>重复</span>
-            <select
-              value={form.repeatRule}
-              onChange={(e) => setForm({ ...form, repeatRule: e.target.value })}
-            >
-              <option value="none">不重复</option>
-              <option value="daily">每天</option>
-              <option value="weekdays">工作日</option>
-              <option value="weekly">每周</option>
-            </select>
+            <div className="chip-row">
+              {(
+                [
+                  { value: "none", label: "不重复" },
+                  { value: "daily", label: "每天" },
+                  { value: "weekdays", label: "工作日" },
+                  { value: "weekly", label: "每周" },
+                ] as const
+              ).map((r) => (
+                <button
+                  type="button"
+                  key={r.value}
+                  className={`chip ${form.repeatRule === r.value ? "active" : ""}`}
+                  onClick={() => setForm({ ...form, repeatRule: r.value })}
+                >
+                  {r.label}
+                </button>
+              ))}
+            </div>
           </label>
         </div>
         <label className="field">

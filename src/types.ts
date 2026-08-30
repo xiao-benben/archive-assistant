@@ -82,6 +82,7 @@ export interface AppSettings {
   modelBaseUrl: string;
   modelName: string;
   modelKeySaved: boolean;
+  vaultPassSaved: boolean;
   quietHours: boolean;
   quietStart: string;
   quietEnd: string;

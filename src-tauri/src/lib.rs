@@ -33,6 +33,7 @@ const INSTALLED_APP_DIR: &str = "归档助手";
 struct AppState {
     root: PathBuf,
     db: Mutex<Connection>,
+    notified: Mutex<HashSet<String>>,
 }
 
 #[derive(Clone, Serialize)]
@@ -120,6 +121,7 @@ struct AppSettings {
     model_base_url: String,
     model_name: String,
     model_key_saved: bool,
+    vault_pass_saved: bool,
     quiet_hours: bool,
     quiet_start: String,
     quiet_end: String,
@@ -138,6 +140,9 @@ impl Default for AppSettings {
             model_base_url: "https://api.deepseek.com".into(),
             model_name: "deepseek-chat".into(),
             model_key_saved: keyring::Entry::new("BEN Archive Assistant", "model-api-key")
+                .and_then(|e| e.get_password())
+                .is_ok(),
+            vault_pass_saved: keyring::Entry::new("BEN Archive Assistant", "vault-pass")
                 .and_then(|e| e.get_password())
                 .is_ok(),
             quiet_hours: false,
@@ -1569,6 +1574,22 @@ fn reveal_password(state: State<'_, AppState>, id: String) -> Result<String, Str
     decrypt_password(&vault_key()?, &enc)
 }
 #[tauri::command]
+fn verify_vault_password(password: String) -> Result<(), String> {
+    let saved = keyring::Entry::new("BEN Archive Assistant", "vault-pass")
+        .and_then(|entry| entry.get_password());
+    match saved {
+        Ok(saved) => {
+            if password.trim() == saved.trim() {
+                Ok(())
+            } else {
+                Err("访问密码不正确".into())
+            }
+        }
+        Err(keyring::Error::NoEntry) => Ok(()),
+        Err(e) => Err(format!("无法读取 Windows 凭据管理器：{e}")),
+    }
+}
+#[tauri::command]
 fn add_file_tags(
     state: State<'_, AppState>,
     relative_paths: Vec<String>,
@@ -1668,6 +1689,7 @@ fn save_settings(
     state: State<'_, AppState>,
     mut settings: AppSettings,
     model_api_key: Option<String>,
+    vault_password: Option<String>,
 ) -> Result<AppSettings, String> {
     if let Some(secret) = model_api_key.filter(|v| !v.trim().is_empty()) {
         keyring::Entry::new("BEN Archive Assistant", "model-api-key")
@@ -1675,6 +1697,13 @@ fn save_settings(
             .set_password(secret.trim())
             .map_err(|e| format!("保存 API 密钥失败：{e}"))?;
         settings.model_key_saved = true
+    }
+    if let Some(secret) = vault_password.filter(|v| !v.trim().is_empty()) {
+        keyring::Entry::new("BEN Archive Assistant", "vault-pass")
+            .map_err(|e| e.to_string())?
+            .set_password(secret.trim())
+            .map_err(|e| format!("保存访问密码失败：{e}"))?;
+        settings.vault_pass_saved = true
     }
     settings.wps_sync_dir = match settings.wps_sync_dir.as_deref().map(str::trim) {
         Some(v) if !v.is_empty() => {
@@ -1760,6 +1789,179 @@ fn read_file_bytes(state: State<'_, AppState>, relative_path: String) -> Result<
 #[tauri::command]
 fn get_file_hash(state: State<'_, AppState>, relative_path: String) -> Result<String, String> {
     hash(&safe(&state, &relative_path)?)
+}
+fn model_api_key() -> Result<String, String> {
+    keyring::Entry::new("BEN Archive Assistant", "model-api-key")
+        .and_then(|entry| entry.get_password())
+        .map_err(|_| "请先在设置中保存大模型 API 密钥".to_string())
+}
+fn truncate_for_model(text: String) -> String {
+    if text.chars().count() > 60_000 {
+        let mut cut: String = text.chars().take(60_000).collect();
+        cut.push_str("\n…（内容过长已截断）");
+        cut
+    } else {
+        text
+    }
+}
+fn file_text_for_ai(
+    s: &AppState,
+    c: &Connection,
+    relative_path: &str,
+) -> Result<String, String> {
+    let path = safe(s, relative_path)?;
+    if !path.is_file() {
+        return Err("目标不是文件".into());
+    }
+    let ext = path
+        .extension()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_lowercase();
+    if matches!(
+        ext.as_str(),
+        "txt" | "md" | "markdown" | "csv" | "log" | "json"
+    ) {
+        if path.metadata().map_err(|e| e.to_string())?.len() > 2 * 1024 * 1024 {
+            return Err("文本文件超过 2 MB，暂不支持 AI 提问".into());
+        }
+        let content = fs::read_to_string(&path).unwrap_or_else(|_| {
+            let bytes = fs::read(&path).unwrap_or_default();
+            String::from_utf8_lossy(&bytes).to_string()
+        });
+        Ok(truncate_for_model(content))
+    } else if matches!(
+        ext.as_str(),
+        "png" | "jpg" | "jpeg" | "webp" | "tif" | "tiff" | "pdf"
+    ) {
+        let r = relative(&s.root, &path);
+        let stored = c
+            .query_row(
+                "SELECT fingerprint,text FROM ocr_results WHERE relative_path=?1",
+                [&r],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        let Some((fingerprint, text)) = stored else {
+            return Err("该文件还没有 OCR 文字索引，请先在详情面板执行离线 OCR".into());
+        };
+        if fingerprint != hash(&path)? {
+            return Err("文件内容已更新，请先重新执行离线 OCR 再提问".into());
+        }
+        Ok(truncate_for_model(text))
+    } else {
+        Err(
+            "暂不支持该文件类型：请使用 txt/md 等文本文件，或先对图片/扫描 PDF 建立 OCR 文字索引"
+                .into(),
+        )
+    }
+}
+async fn ai_chat(
+    base_url: &str,
+    api_key: &str,
+    model: &str,
+    system: &str,
+    user: &str,
+) -> Result<String, String> {
+    let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .map_err(|e| format!("初始化网络客户端失败：{e}"))?;
+    let body = serde_json::json!({
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user}
+        ],
+        "temperature": 0.3,
+        "stream": false
+    });
+    let resp = client
+        .post(url)
+        .bearer_auth(api_key)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("连接大模型服务失败：{e}"))?;
+    let status = resp.status();
+    let value: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("解析大模型响应失败：{e}"))?;
+    if !status.is_success() {
+        let msg = value["error"]["message"]
+            .as_str()
+            .unwrap_or("未知错误");
+        return Err(format!("大模型服务返回错误（{status}）：{msg}"));
+    }
+    value["choices"][0]["message"]["content"]
+        .as_str()
+        .map(|s| s.trim().to_string())
+        .ok_or_else(|| "响应中没有回答内容".into())
+}
+#[tauri::command]
+async fn ai_ask(
+    state: State<'_, AppState>,
+    relative_path: String,
+    question: String,
+) -> Result<String, String> {
+    let question = question.trim().to_string();
+    if question.is_empty() {
+        return Err("请输入问题".into());
+    }
+    let (settings, content) = {
+        let c = db(&state)?;
+        let settings = load_settings(&c);
+        let content = file_text_for_ai(&state, &c, &relative_path)?;
+        (settings, content)
+    };
+    let api_key = model_api_key()?;
+    let system = "你是本地归档助手的文件内容分析助手。基于用户提供的文件内容回答问题，用简体中文，简洁、准确、分点。如果问题无法从文件内容中得到答案，请如实说明。".to_string();
+    let user = format!("【文件内容】\n{content}\n\n【问题】\n{question}");
+    let answer = ai_chat(
+        &settings.model_base_url,
+        &api_key,
+        &settings.model_name,
+        &system,
+        &user,
+    )
+    .await?;
+    {
+        let c = db(&state)?;
+        c.execute(
+            "INSERT INTO ai_jobs VALUES(?1,?2,?3,?4,?5,?6,?7)",
+            params![
+                Uuid::new_v4().to_string(),
+                settings.model_name,
+                "ask",
+                relative_path,
+                "done",
+                truncate_for_model(answer.clone()).chars().take(20000).collect::<String>(),
+                ms(SystemTime::now())
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(answer)
+}
+#[tauri::command]
+async fn ai_test_connection(state: State<'_, AppState>) -> Result<String, String> {
+    let settings = {
+        let c = db(&state)?;
+        load_settings(&c)
+    };
+    let api_key = model_api_key()?;
+    let answer = ai_chat(
+        &settings.model_base_url,
+        &api_key,
+        &settings.model_name,
+        "你是连通性测试端点，只输出要求的内容。",
+        "请只回复两个字：正常",
+    )
+    .await?;
+    Ok(format!("连接成功（{}）：{}", settings.model_name, answer))
 }
 fn ensure_wps_dir_usable(root: &Path, dir: &Path) -> Result<(), String> {
     let root = simplify(
@@ -1977,6 +2179,62 @@ fn set_wps_file_sync(
     }
 }
 
+fn remind_due_tasks(app: &AppHandle) -> Result<(), String> {
+    use tauri_plugin_notification::NotificationExt;
+    let state = app.state::<AppState>();
+    let c = db(&state)?;
+    let settings = load_settings(&c);
+    if !settings.notifications {
+        return Ok(());
+    }
+    let now = Local::now();
+    let today = now.format("%Y-%m-%d").to_string();
+    let hhmm = now.format("%H:%M").to_string();
+    let quiet = settings.quiet_hours
+        && (if settings.quiet_start <= settings.quiet_end {
+            hhmm >= settings.quiet_start && hhmm < settings.quiet_end
+        } else {
+            hhmm >= settings.quiet_start || hhmm < settings.quiet_end
+        });
+    if quiet {
+        return Ok(());
+    }
+    let mut stmt = c
+        .prepare(
+            "SELECT id,title,remind_at FROM tasks
+             WHERE completed=0 AND due_date=?1 AND remind_at IS NOT NULL AND remind_at<=?2",
+        )
+        .map_err(|e| e.to_string())?;
+    let due: Vec<(String, String, String)> = stmt
+        .query_map(params![today, hhmm], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .map_err(|e| e.to_string())?
+        .filter_map(Result::ok)
+        .collect();
+    drop(stmt);
+    drop(c);
+    drop(state);
+    let state = app.state::<AppState>();
+    let mut notified = state.notified.lock().map_err(|_| "通知去重记录不可用")?;
+    if notified.len() > 500 {
+        notified.clear();
+    }
+    for (id, title, remind_at) in due {
+        let key = format!("{id}|{today}|{remind_at}");
+        if notified.contains(&key) {
+            continue;
+        }
+        app.notification()
+            .builder()
+            .title("归档助手 · 今日计划")
+            .body(format!("{remind_at} · {title}"))
+            .show()
+            .map_err(|e| format!("发送通知失败：{e}"))?;
+        notified.insert(key);
+    }
+    Ok(())
+}
 fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     let show = MenuItem::with_id(app, "show", "显示归档助手", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
@@ -2053,6 +2311,12 @@ pub fn run() {
             app.manage(AppState {
                 root: PathBuf::from(ROOT),
                 db: Mutex::new(c),
+                notified: Mutex::new(HashSet::new()),
+            });
+            let reminder_handle = app.handle().clone();
+            std::thread::spawn(move || loop {
+                std::thread::sleep(std::time::Duration::from_secs(30));
+                let _ = remind_due_tasks(&reminder_handle);
             });
             setup_tray(app.handle())?;
             if std::env::args().any(|a| a == "--minimized") {
@@ -2094,6 +2358,9 @@ pub fn run() {
             open_file_with,
             reveal_in_explorer,
             set_wps_file_sync,
+            verify_vault_password,
+            ai_ask,
+            ai_test_connection,
             save_password_entry,
             delete_password_entry,
             reveal_password,
@@ -2164,6 +2431,7 @@ mod tests {
         let state = AppState {
             root: root.path().to_path_buf(),
             db: Mutex::new(Connection::open_in_memory().expect("创建数据库")),
+            notified: Mutex::new(HashSet::new()),
         };
         assert_eq!(
             safe(&state, "技术工作\\报告.docx").expect("接受相对路径"),
