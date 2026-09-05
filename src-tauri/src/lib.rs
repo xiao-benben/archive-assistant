@@ -2201,13 +2201,14 @@ fn remind_due_tasks(app: &AppHandle) -> Result<(), String> {
     }
     let mut stmt = c
         .prepare(
-            "SELECT id,title,remind_at FROM tasks
-             WHERE completed=0 AND due_date=?1 AND remind_at IS NOT NULL AND remind_at<=?2",
+            "SELECT id,title,COALESCE(NULLIF(remind_at,''),'09:00'),due_date FROM tasks
+             WHERE completed=0 AND (due_date<?1 OR
+               (due_date=?1 AND COALESCE(NULLIF(remind_at,''),'09:00')<=?2))",
         )
         .map_err(|e| e.to_string())?;
-    let due: Vec<(String, String, String)> = stmt
+    let due: Vec<(String, String, String, String)> = stmt
         .query_map(params![today, hhmm], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
         })
         .map_err(|e| e.to_string())?
         .filter_map(Result::ok)
@@ -2217,18 +2218,15 @@ fn remind_due_tasks(app: &AppHandle) -> Result<(), String> {
     drop(state);
     let state = app.state::<AppState>();
     let mut notified = state.notified.lock().map_err(|_| "通知去重记录不可用")?;
-    if notified.len() > 500 {
-        notified.clear();
-    }
-    for (id, title, remind_at) in due {
-        let key = format!("{id}|{today}|{remind_at}");
+    for (id, title, remind_at, due_date) in due {
+        let key = format!("{id}|{due_date}|{remind_at}");
         if notified.contains(&key) {
             continue;
         }
         app.notification()
             .builder()
-            .title("归档助手 · 今日计划")
-            .body(format!("{remind_at} · {title}"))
+            .title("归档助手 · 待办提醒")
+            .body(format!("{due_date} {remind_at} · {title}"))
             .show()
             .map_err(|e| format!("发送通知失败：{e}"))?;
         notified.insert(key);
@@ -2315,8 +2313,11 @@ pub fn run() {
             });
             let reminder_handle = app.handle().clone();
             std::thread::spawn(move || loop {
+                if let Err(error) = remind_due_tasks(&reminder_handle) {
+                    eprintln!("计划提醒失败：{error}");
+                    let _ = reminder_handle.emit("reminder-error", error);
+                }
                 std::thread::sleep(std::time::Duration::from_secs(30));
-                let _ = remind_due_tasks(&reminder_handle);
             });
             setup_tray(app.handle())?;
             if std::env::args().any(|a| a == "--minimized") {

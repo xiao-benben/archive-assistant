@@ -242,6 +242,7 @@ export default function App() {
   const [dragging, setDragging] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
   const autoOcrRunning = useRef(false);
+  const directoryRequest = useRef(0);
   const tell = useCallback((text: string, error = false) => {
     setToast({ text, error });
     setTimeout(() => setToast(null), 3200);
@@ -259,22 +260,40 @@ export default function App() {
   useEffect(() => {
     document.documentElement.dataset.theme = data?.settings.theme ?? "light";
   }, [data?.settings.theme]);
+  useEffect(() => {
+    if (!isTauri()) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listen<string>("reminder-error", (event) => {
+      if (!disposed) tell(`待办提醒发送失败：${event.payload}`, true);
+    }).then((stop) => {
+      if (disposed) stop();
+      else unlisten = stop;
+    }).catch((error) => console.error("提醒状态监听失败", error));
+    return () => { disposed = true; unlisten?.(); };
+  }, [tell]);
   const load = useCallback(
     async (next: string) => {
+      const request = ++directoryRequest.current;
       setLoading(true);
       try {
-        setFiles(await api.listDirectory(next));
+        const entries = await api.listDirectory(next);
+        if (request !== directoryRequest.current) return;
+        setFiles(entries);
         setPath(next);
         setSelected(new Set());
       } catch (e) {
         tell(message(e), true);
       } finally {
-        setLoading(false);
+        if (request === directoryRequest.current) setLoading(false);
       }
     },
     [tell],
   );
   const workspace = (next: string) => {
+    setPath(next);
+    setFiles([]);
+    setSelected(new Set());
     setView("workspace");
     setSidebar(false);
     void load(next);
@@ -282,26 +301,32 @@ export default function App() {
   useEffect(() => {
     if (!isTauri()) return;
     let timer: number | undefined;
+    let disposed = false;
     let unlisten: (() => void) | undefined;
     void listen("filesystem-changed", () => {
+      if (disposed) return;
       window.clearTimeout(timer);
       timer = window.setTimeout(() => {
         void refresh();
         if (path) void load(path);
       }, 450);
     }).then((stop) => {
-      unlisten = stop;
+      if (disposed) stop();
+      else unlisten = stop;
     });
     return () => {
+      disposed = true;
       window.clearTimeout(timer);
       unlisten?.();
     };
   }, [load, path, refresh]);
   useEffect(() => {
     if (!isTauri() || view !== "workspace" || !path) return;
+    let disposed = false;
     let unlisten: (() => void) | undefined;
     void getCurrentWindow()
       .onDragDropEvent((event) => {
+        if (disposed) return;
         if (event.payload.type === "enter" || event.payload.type === "over")
           setDragging(true);
         if (event.payload.type === "leave") setDragging(false);
@@ -314,7 +339,7 @@ export default function App() {
             .importFiles(dropped, path, "copy")
             .then(async (result) => {
               await refresh();
-              await load(path);
+              if (!disposed) await load(path);
               tell(result.message);
             })
             .catch((error) => tell(message(error), true))
@@ -322,9 +347,12 @@ export default function App() {
         }
       })
       .then((stop) => {
-        unlisten = stop;
-      });
+        if (disposed) stop();
+        else unlisten = stop;
+      })
+      .catch((error) => { if (!disposed) tell(message(error), true); });
     return () => {
+      disposed = true;
       setDragging(false);
       unlisten?.();
     };
@@ -1527,6 +1555,12 @@ function FilesPage({
               clearSelection();
           }}
         >
+          {!grid && files.length > 0 && (
+            <div className="file-table-head" aria-hidden="true">
+              <span /><span /><span>文件名称</span><span className="file-type">类型</span>
+              <span className="file-size">大小</span><span>修改时间</span><span />
+            </div>
+          )}
           {loading ? (
             <div className="loading-block">
               <LoaderCircle className="spin" />
@@ -1540,9 +1574,9 @@ function FilesPage({
                   key={file.relativePath}
                   onClick={(e) => select(file.relativePath, e.ctrlKey)}
                   onDoubleClick={() => open(file)}
-                  title={file.isDirectory ? "双击进入文件夹" : "双击打开文件"}
+                  title={`${file.name}\n${file.isDirectory ? "双击进入文件夹" : "双击打开文件"}`}
                 >
-                  <span className="tile-icon">
+                  <span className="tile-icon" data-extension={file.isDirectory ? "folder" : file.extension.toLowerCase()}>
                     <Icon file={file} size={34} />
                   </span>
                   <strong>{file.name}</strong>
@@ -1576,7 +1610,7 @@ function FilesPage({
                   key={file.relativePath}
                   onClick={(e) => select(file.relativePath, e.ctrlKey)}
                   onDoubleClick={() => open(file)}
-                  title={file.isDirectory ? "双击进入文件夹" : "双击打开文件"}
+                  title={`${file.name}\n${file.isDirectory ? "双击进入文件夹" : "双击打开文件"}`}
                 >
                   <button
                     type="button"
@@ -1592,7 +1626,7 @@ function FilesPage({
                   >
                     {selected.has(file.relativePath) && <Check />}
                   </button>
-                  <span className="file-icon">
+                  <span className="file-icon" data-extension={file.isDirectory ? "folder" : file.extension.toLowerCase()}>
                     <Icon file={file} />
                   </span>
                   <span className="file-name">
@@ -2220,9 +2254,11 @@ function FavoritesPage({
   const [dropping, setDropping] = useState(false);
   useEffect(() => {
     if (!isTauri() || !category) return;
+    let disposed = false;
     let unlisten: (() => void) | undefined;
     void getCurrentWindow()
       .onDragDropEvent((event) => {
+        if (disposed) return;
         if (event.payload.type === "enter" || event.payload.type === "over") {
           setDropping(true);
         } else if (event.payload.type === "leave") {
@@ -2233,9 +2269,12 @@ function FavoritesPage({
         }
       })
       .then((stop) => {
-        unlisten = stop;
-      });
+        if (disposed) stop();
+        else unlisten = stop;
+      })
+      .catch((error) => console.error("收藏拖拽监听失败", error));
     return () => {
+      disposed = true;
       setDropping(false);
       unlisten?.();
     };
@@ -2400,7 +2439,6 @@ function PlannerPage({
   );
   const weeklyTasks = tasks.filter(
     (task) =>
-      task.planScope === "weekly" &&
       task.dueDate >= weekStart &&
       task.dueDate <= weekEnd,
   );
@@ -2439,6 +2477,7 @@ function PlannerPage({
         <div onClick={() => edit(task)}>
           <strong>{task.title}</strong>
           <span>
+            {scope === "weekly" && `${task.planScope === "daily" ? "日计划" : "周计划"} · `}
             {task.note ||
               {
                 daily: "每天重复",
@@ -2630,7 +2669,7 @@ function PlannerPage({
                 <small>
                   {tasks.filter(
                     (task) =>
-                      task.planScope === "weekly" && task.dueDate === key,
+                      task.dueDate === key,
                   ).length || ""}
                 </small>
               </button>
@@ -2810,6 +2849,10 @@ function SettingsPage({
   notify: (text: string, error?: boolean) => void;
 }) {
   const [draft, setDraft] = useState(value);
+  useEffect(() => {
+    document.documentElement.dataset.theme = draft.theme;
+    return () => { document.documentElement.dataset.theme = value.theme; };
+  }, [draft.theme, value.theme]);
   const [key, setKey] = useState("");
   const [vaultPass, setVaultPass] = useState("");
   const [syncing, setSyncing] = useState(false);
@@ -2926,7 +2969,7 @@ function SettingsPage({
             </div>
           )}
           <div className="theme-choice">
-            <span>外观主题</span>
+            <span>外观主题<small className="theme-hint">即时预览，保存设置后保留</small></span>
             <div>
               <button
                 className={draft.theme === "light" ? "active" : ""}
@@ -3764,7 +3807,7 @@ function TaskDialog({
         </div>
         <div className="field-row">
           <label className="field">
-            <span>提醒时间</span>
+            <span>提醒时间（留空默认当天 09:00）</span>
             <div className="chip-row">
               <input
                 type="time"
@@ -3780,7 +3823,7 @@ function TaskDialog({
                   className="chip"
                   onClick={() => setForm({ ...form, remindAt: "" })}
                 >
-                  不提醒
+                  默认 09:00
                 </button>
               )}
             </div>

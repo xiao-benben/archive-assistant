@@ -1,9 +1,10 @@
 {
   "name": "archive-assistant",
   "private": true,
-  "version": "0.2.6",
+  "version": "0.2.7",
   "type": "module",
   "scripts": {
+    "test": "node --test scripts/regression.test.mjs",
     "dev": "vite",
     "build": "tsc && vite build",
     "prepare:ocr": "node scripts/prepare-ocr.mjs",
